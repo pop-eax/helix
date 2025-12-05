@@ -1,0 +1,9 @@
+// Conditional computation
+fn max(Public Field<64> a, Public Field<64> b) -> Field<64> {
+    if a > b {
+        return a;
+    } else {
+        return b;
+    }
+}
+

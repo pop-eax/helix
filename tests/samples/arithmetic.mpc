@@ -1,0 +1,7 @@
+// Complex arithmetic operations
+fn compute(Public Field<64> a, Public Field<64> b, Public Field<64> c) -> Field<64> {
+    let Public Field<64> temp = a * b;
+    let Public Field<64> result = temp + c;
+    return result;
+}
+

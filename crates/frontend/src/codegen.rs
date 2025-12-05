@@ -1,0 +1,764 @@
+// AST to HIR Code Generation
+
+use std::collections::HashMap;
+use crate::ast;
+use crate::ast::*;
+use ir::hir::*;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum CodegenError {
+    #[error("Undefined variable: {0}")]
+    UndefinedVariable(String),
+    
+    #[error("Undefined struct: {0}")]
+    UndefinedStruct(String),
+    
+    #[error("Undefined function: {0}")]
+    UndefinedFunction(String),
+    
+    #[error("Invalid type conversion: {0}")]
+    InvalidTypeConversion(String),
+    
+    #[error("Control flow error: {0}")]
+    ControlFlowError(String),
+}
+
+pub type CodegenResult<T> = Result<T, CodegenError>;
+
+/// Converts AST Program to HIR Program
+pub fn codegen(ast: &Program) -> CodegenResult<HirProgram> {
+    let mut generator = Codegen::new();
+    generator.generate_program(ast)
+}
+
+struct Codegen {
+    builder: HirBuilder,
+    structs: HashMap<String, StructDef>,
+    functions: HashMap<String, FunctionDef>,
+    variables: Vec<HashMap<String, HirValue>>, // Stack of scopes
+    current_function: Option<String>,
+}
+
+impl Codegen {
+    fn new() -> Self {
+        Self {
+            builder: HirBuilder::new(),
+            structs: HashMap::new(),
+            functions: HashMap::new(),
+            variables: Vec::new(),
+            current_function: None,
+        }
+    }
+
+    fn generate_program(&mut self, program: &ast::Program) -> CodegenResult<HirProgram> {
+        // First pass: collect structs and functions
+        for item in &program.items {
+            match item {
+                Item::StructDef(struct_def) => {
+                    self.structs.insert(struct_def.name.clone(), struct_def.clone());
+                }
+                Item::FunctionDef(func_def) => {
+                    self.functions.insert(func_def.name.clone(), func_def.clone());
+                }
+            }
+        }
+
+        // Convert structs
+        let mut hir_structs = Vec::new();
+        for item in &program.items {
+            if let Item::StructDef(struct_def) = item {
+                hir_structs.push(self.convert_struct_def(struct_def)?);
+            }
+        }
+
+        // Convert functions
+        let mut hir_functions = Vec::new();
+        for item in &program.items {
+            if let Item::FunctionDef(func_def) = item {
+                hir_functions.push(self.convert_function(func_def)?);
+            }
+        }
+
+        Ok(HirProgram {
+            structs: hir_structs,
+            functions: hir_functions,
+        })
+    }
+
+    fn convert_struct_def(&self, struct_def: &StructDef) -> CodegenResult<HirStructDef> {
+        let mut fields = Vec::new();
+        for f in &struct_def.fields {
+            fields.push(HirStructField {
+                name: f.name.clone(),
+                ty: self.convert_type(&f.ty)?,
+            });
+        }
+
+        Ok(HirStructDef {
+            name: struct_def.name.clone(),
+            fields,
+        })
+    }
+
+    fn convert_function(&mut self, func_def: &FunctionDef) -> CodegenResult<HirFunction> {
+        self.current_function = Some(func_def.name.clone());
+        self.builder = HirBuilder::new();
+        self.enter_scope();
+
+        // Create entry block
+        let entry_block = self.builder.create_block();
+        self.builder.set_current_block(entry_block);
+
+        // Convert parameters
+        let mut hir_params = Vec::new();
+        for (idx, param) in func_def.params.iter().enumerate() {
+            let hir_param = HirParam {
+                name: param.name.clone(),
+                ty: self.convert_type(&param.ty)?,
+                visibility: self.convert_visibility(&param.visibility),
+            };
+            hir_params.push(hir_param);
+
+            // Add parameter to scope as a Param value
+            let param_value = HirValue::Param(idx);
+            self.declare_variable(param.name.clone(), param_value);
+        }
+
+        // Convert function body
+        let return_type = self.convert_type(&func_def.return_type)?;
+        self.convert_block(&func_def.body, entry_block)?;
+
+        // Get all blocks (clone since get_blocks takes ownership)
+        let blocks = self.builder.get_blocks_ref().clone();
+
+        self.exit_scope();
+        self.current_function = None;
+
+        Ok(HirFunction {
+            name: func_def.name.clone(),
+            params: hir_params,
+            return_type,
+            entry_block,
+            blocks,
+        })
+    }
+
+    fn convert_block(&mut self, block: &Block, current_block: BlockId) -> CodegenResult<()> {
+        self.builder.set_current_block(current_block);
+
+        for stmt in &block.statements {
+            self.convert_statement(stmt)?;
+        }
+
+        // If block doesn't have a terminator, add one
+        // This will be handled by checking if terminator is set
+        Ok(())
+    }
+
+    fn convert_statement(&mut self, stmt: &Statement) -> CodegenResult<()> {
+        match stmt {
+            Statement::VariableDecl(decl) => {
+                self.convert_variable_decl(decl)?;
+            }
+            Statement::Assignment(assign) => {
+                self.convert_assignment(assign)?;
+            }
+            Statement::If(if_stmt) => {
+                self.convert_if_statement(if_stmt)?;
+            }
+            Statement::ForLoop(for_loop) => {
+                self.convert_for_loop(for_loop)?;
+            }
+            Statement::Return(ret) => {
+                self.convert_return(ret)?;
+            }
+            Statement::Directive(dir) => {
+                self.convert_directive(dir)?;
+            }
+            Statement::Expr(expr) => {
+                self.convert_expression(expr)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn convert_variable_decl(&mut self, decl: &VariableDecl) -> CodegenResult<()> {
+        let ty = self.convert_type(&decl.ty)?;
+        
+        let value = if let Some(init) = &decl.initializer {
+            self.convert_expression(init)?
+        } else {
+            // Default initialization - create zero/empty value
+            match &ty {
+                HirType::Field { size } => HirValue::Constant(HirConstant::Field { value: 0, size: *size }),
+                HirType::Bool => HirValue::Constant(HirConstant::Bool(false)),
+                HirType::Array { element_type, size } => {
+                    // For arrays, we'll need to allocate
+                    // For now, create a placeholder - this needs proper array allocation
+                    return Err(CodegenError::InvalidTypeConversion(
+                        "Array initialization without initializer not yet supported".to_string(),
+                    ));
+                }
+                HirType::Struct { .. } => {
+                    return Err(CodegenError::InvalidTypeConversion(
+                        "Struct initialization without initializer not yet supported".to_string(),
+                    ));
+                }
+            }
+        };
+
+        // Store the value directly
+        // In a full SSA implementation, we'd create phi nodes for reassignments
+        // For now, we store the value as-is (constants or instruction results)
+        self.declare_variable(decl.name.clone(), value);
+        Ok(())
+    }
+
+    fn convert_assignment(&mut self, assign: &Assignment) -> CodegenResult<()> {
+        let value = self.convert_expression(&assign.value)?;
+        
+        // For now, we'll handle simple variable assignments
+        // In a full SSA implementation, we'd need to handle phi nodes for reassignments
+        if assign.lvalue.accesses.is_empty() {
+            // Simple variable assignment
+            if let Some(var_value) = self.lookup_variable(&assign.lvalue.base) {
+                // Update the variable (in real SSA, this would create a new version)
+                // For now, we'll just update the mapping
+                if let Some(scope) = self.variables.last_mut() {
+                    scope.insert(assign.lvalue.base.clone(), value);
+                }
+            } else {
+                return Err(CodegenError::UndefinedVariable(assign.lvalue.base.clone()));
+            }
+        } else {
+            // Array/struct field assignment - needs special handling
+            return Err(CodegenError::InvalidTypeConversion(
+                "Complex lvalue assignment not yet implemented".to_string(),
+            ));
+        }
+        
+        Ok(())
+    }
+
+    fn convert_if_statement(&mut self, if_stmt: &IfStatement) -> CodegenResult<()> {
+        let condition = self.convert_expression(&if_stmt.condition)?;
+        
+        // Create blocks for then, else, and merge
+        let then_block = self.builder.create_block();
+        let else_block = if if_stmt.else_block.is_some() {
+            Some(self.builder.create_block())
+        } else {
+            None
+        };
+        let merge_block = self.builder.create_block();
+
+        // Add branch terminator to current block
+        self.builder.set_terminator(HirTerminator::Branch {
+            condition,
+            then_block,
+            else_block: else_block.unwrap_or(merge_block),
+        });
+
+        // Convert then block
+        self.builder.set_current_block(then_block);
+        self.convert_block(&if_stmt.then_block, then_block)?;
+        // Add jump to merge
+        self.builder.set_terminator(HirTerminator::Jump { target: merge_block });
+
+        // Convert else block if present
+        if let Some(else_blk) = else_block {
+            self.builder.set_current_block(else_blk);
+            self.convert_block(if_stmt.else_block.as_ref().unwrap(), else_blk)?;
+            self.builder.set_terminator(HirTerminator::Jump { target: merge_block });
+        }
+
+        // Continue in merge block
+        self.builder.set_current_block(merge_block);
+        Ok(())
+    }
+
+    fn convert_for_loop(&mut self, for_loop: &ForLoop) -> CodegenResult<()> {
+        // For loops in MPC are typically unrolled
+        // For now, we'll create a simple unrolled version
+        
+        let loop_body_block = self.builder.create_block();
+        let exit_block = self.builder.create_block();
+
+        // Enter loop scope
+        self.enter_scope();
+
+        // Unroll the loop
+        for i in for_loop.start..for_loop.end {
+            // Create a constant for the loop variable value
+            let loop_var_value = HirValue::Constant(HirConstant::Field {
+                value: i,
+                size: 64, // Assuming 64-bit for loop indices
+            });
+            
+            // Store loop variable (in a real implementation, this would be an instruction)
+            self.declare_variable(for_loop.var_name.clone(), loop_var_value);
+            
+            // Convert loop body
+            self.builder.set_current_block(loop_body_block);
+            self.convert_block(&for_loop.body, loop_body_block)?;
+        }
+
+        self.exit_scope();
+
+        // Jump to exit
+        self.builder.set_terminator(HirTerminator::Jump { target: exit_block });
+        self.builder.set_current_block(exit_block);
+
+        Ok(())
+    }
+
+    fn convert_return(&mut self, ret: &ReturnStatement) -> CodegenResult<()> {
+        let value = self.convert_expression(&ret.value)?;
+        self.builder.set_terminator(HirTerminator::Return { value });
+        Ok(())
+    }
+
+    fn convert_directive(&mut self, dir: &Directive) -> CodegenResult<()> {
+        match dir {
+            Directive::Print(print) => {
+                // Print directives are side effects - just evaluate expressions
+                for expr in &print.expressions {
+                    self.convert_expression(expr)?;
+                }
+            }
+            Directive::Assert(assert) => {
+                self.convert_expression(&assert.condition)?;
+            }
+            Directive::Abort(_) => {
+                // Abort is a side effect - no codegen needed for now
+            }
+            Directive::Reveal(_) => {
+                // Reveal is a side effect
+            }
+            Directive::Debug(debug) => {
+                let debug_block = self.builder.create_block();
+                self.convert_block(&debug.block, debug_block)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn convert_expression(&mut self, expr: &Expression) -> CodegenResult<HirValue> {
+        let base_value = match &expr.base {
+            ExpressionBase::Literal(lit) => self.convert_literal(lit)?,
+            ExpressionBase::ArrayLiteral(arr) => self.convert_array_literal(arr)?,
+            ExpressionBase::StructLiteral(struct_lit) => self.convert_struct_literal(struct_lit)?,
+            ExpressionBase::FunctionCall(call) => self.convert_function_call(call)?,
+            ExpressionBase::Identifier(name) => {
+                self.lookup_variable(name)
+                    .ok_or_else(|| CodegenError::UndefinedVariable(name.clone()))?
+                    .clone()
+            }
+            ExpressionBase::BinaryOp(bin_op) => self.convert_binary_op(bin_op)?,
+            ExpressionBase::UnaryOp(unary_op) => self.convert_unary_op(unary_op)?,
+            ExpressionBase::Parenthesized(expr) => self.convert_expression(expr)?,
+        };
+
+        // Apply postfix accesses
+        let mut result = base_value;
+        for access in &expr.accesses {
+            result = self.apply_access(&result, access)?;
+        }
+
+        Ok(result)
+    }
+
+    fn convert_literal(&self, lit: &Literal) -> CodegenResult<HirValue> {
+        match lit {
+            Literal::Integer(value) => Ok(HirValue::Constant(HirConstant::Field {
+                value: *value,
+                size: 64, // Default size - should be inferred from context
+            })),
+            Literal::Bool(value) => Ok(HirValue::Constant(HirConstant::Bool(*value))),
+        }
+    }
+
+    fn convert_array_literal(&mut self, arr: &ArrayLiteral) -> CodegenResult<HirValue> {
+        if arr.elements.is_empty() {
+            return Err(CodegenError::InvalidTypeConversion(
+                "Empty array literals not supported".to_string(),
+            ));
+        }
+
+        // Convert all elements
+        let mut element_values = Vec::new();
+        for elem in &arr.elements {
+            element_values.push(self.convert_expression(elem)?);
+        }
+
+        // For now, we'll create individual load instructions
+        // In a full implementation, we'd allocate an array and store values
+        // This is a simplified version
+        let first_elem = element_values[0].clone();
+        
+        // Create array allocation instruction (simplified)
+        // In reality, we'd need to handle array storage properly
+        Ok(first_elem) // Placeholder
+    }
+
+    fn convert_struct_literal(&mut self, struct_lit: &StructLiteral) -> CodegenResult<HirValue> {
+        // Get struct definition
+        let struct_def = self.structs.get(&struct_lit.struct_name)
+            .ok_or_else(|| CodegenError::UndefinedStruct(struct_lit.struct_name.clone()))?;
+
+        // Convert field values
+        let mut field_values = HashMap::new();
+        for field_init in &struct_lit.fields {
+            let value = self.convert_expression(&field_init.value)?;
+            field_values.insert(field_init.name.clone(), value);
+        }
+
+        // Create struct allocation and field initialization
+        // For now, return a placeholder
+        // In full implementation, we'd create StructAlloc and field store instructions
+        let struct_ty = HirType::Struct {
+            name: struct_lit.struct_name.clone(),
+        };
+        
+        // Create a placeholder instruction
+        let value_id = self.builder.add_instruction(
+            HirInstructionKind::StructAlloc {
+                struct_name: struct_lit.struct_name.clone(),
+            },
+            struct_ty,
+        );
+        
+        Ok(HirValue::Instruction(value_id))
+    }
+
+    fn convert_function_call(&mut self, call: &FunctionCall) -> CodegenResult<HirValue> {
+        // Get function definition and return type first
+        let return_type = {
+            let func_def = self.functions.get(&call.name)
+                .ok_or_else(|| CodegenError::UndefinedFunction(call.name.clone()))?;
+            self.convert_type(&func_def.return_type)?
+        };
+
+        // Convert arguments
+        let mut args = Vec::new();
+        for arg in &call.arguments {
+            args.push(self.convert_expression(arg)?);
+        }
+
+        // Create call instruction
+        let value_id = self.builder.add_instruction(
+            HirInstructionKind::Call {
+                function_name: call.name.clone(),
+                args,
+            },
+            return_type,
+        );
+
+        Ok(HirValue::Instruction(value_id))
+    }
+
+    fn convert_binary_op(&mut self, bin_op: &BinaryOp) -> CodegenResult<HirValue> {
+        match bin_op {
+            BinaryOp::Add(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 }; // Infer from types
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::Add { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::Subtract(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::Sub { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::Multiply(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::Mul { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::Divide(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::Div { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::Modulo(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::Mod { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::BitwiseAnd(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::BitwiseAnd { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::BitwiseOr(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::BitwiseOr { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::BitwiseXor(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::BitwiseXor { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::Shift(op, left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Field { size: 64 };
+                let kind = match op {
+                    ShiftOp::Left => HirInstructionKind::ShiftLeft {
+                        value: left_val,
+                        amount: right_val,
+                    },
+                    ShiftOp::Right => HirInstructionKind::ShiftRight {
+                        value: left_val,
+                        amount: right_val,
+                    },
+                };
+                let value_id = self.builder.add_instruction(kind, ty);
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::LogicalAnd(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Bool;
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::LogicalAnd { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::LogicalOr(left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Bool;
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::LogicalOr { left: left_val, right: right_val },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            BinaryOp::Comparison(op, left, right) => {
+                let left_val = self.convert_expression(left)?;
+                let right_val = self.convert_expression(right)?;
+                let ty = HirType::Bool;
+                let kind = match op {
+                    ComparisonOp::Equal => HirInstructionKind::Equal {
+                        left: left_val,
+                        right: right_val,
+                    },
+                    ComparisonOp::NotEqual => HirInstructionKind::NotEqual {
+                        left: left_val,
+                        right: right_val,
+                    },
+                    ComparisonOp::LessThan => HirInstructionKind::LessThan {
+                        left: left_val,
+                        right: right_val,
+                    },
+                    ComparisonOp::LessThanOrEqual => HirInstructionKind::LessThanOrEqual {
+                        left: left_val,
+                        right: right_val,
+                    },
+                    ComparisonOp::GreaterThan => HirInstructionKind::GreaterThan {
+                        left: left_val,
+                        right: right_val,
+                    },
+                    ComparisonOp::GreaterThanOrEqual => HirInstructionKind::GreaterThanOrEqual {
+                        left: left_val,
+                        right: right_val,
+                    },
+                };
+                let value_id = self.builder.add_instruction(kind, ty);
+                Ok(HirValue::Instruction(value_id))
+            }
+        }
+    }
+
+    fn convert_unary_op(&mut self, unary_op: &UnaryOp) -> CodegenResult<HirValue> {
+        match unary_op {
+            UnaryOp::Negate(expr) => {
+                let value = self.convert_expression(expr)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::Negate { value },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            UnaryOp::Not(expr) => {
+                let value = self.convert_expression(expr)?;
+                let ty = HirType::Bool;
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::Not { value },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            UnaryOp::BitwiseNot(expr) => {
+                let value = self.convert_expression(expr)?;
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::BitwiseNot { value },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+        }
+    }
+
+    fn apply_access(&mut self, base: &HirValue, access: &ExprAccess) -> CodegenResult<HirValue> {
+        match access {
+            ExprAccess::Array(index_expr) => {
+                let index = self.convert_expression(index_expr)?;
+                let ty = HirType::Field { size: 64 }; // Infer from base type
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::ArrayLoad {
+                        array: base.clone(),
+                        index,
+                    },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+            ExprAccess::Field(field_name) => {
+                // Infer struct type from base - simplified for now
+                let ty = HirType::Field { size: 64 };
+                let value_id = self.builder.add_instruction(
+                    HirInstructionKind::StructField {
+                        struct_val: base.clone(),
+                        field_name: field_name.clone(),
+                    },
+                    ty,
+                );
+                Ok(HirValue::Instruction(value_id))
+            }
+        }
+    }
+
+    // Type conversion helpers
+    fn convert_type(&self, ty: &TypeExpr) -> CodegenResult<HirType> {
+        match ty {
+            TypeExpr::Base(base) => match base {
+                BaseType::Field(field) => Ok(HirType::Field { size: field.size }),
+                BaseType::Bool => Ok(HirType::Bool),
+            },
+            TypeExpr::Array(arr) => Ok(HirType::Array {
+                element_type: Box::new(self.convert_type(&arr.element_type)?),
+                size: arr.size,
+            }),
+            TypeExpr::Struct(struct_ty) => Ok(HirType::Struct {
+                name: struct_ty.name.clone(),
+            }),
+        }
+    }
+
+    fn convert_visibility(&self, vis: &crate::ast::Visibility) -> ir::hir::Visibility {
+        match vis {
+            crate::ast::Visibility::Public => ir::hir::Visibility::Public,
+            crate::ast::Visibility::Secret => ir::hir::Visibility::Secret,
+        }
+    }
+
+    // Scope management
+    fn enter_scope(&mut self) {
+        self.variables.push(HashMap::new());
+    }
+
+    fn exit_scope(&mut self) {
+        self.variables.pop();
+    }
+
+    fn declare_variable(&mut self, name: String, value: HirValue) {
+        if let Some(scope) = self.variables.last_mut() {
+            scope.insert(name, value);
+        }
+    }
+
+    fn lookup_variable(&self, name: &str) -> Option<&HirValue> {
+        for scope in self.variables.iter().rev() {
+            if let Some(value) = scope.get(name) {
+                return Some(value);
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::*;
+    use crate::type_checker::*;
+
+    fn parse_type_check_and_codegen(source: &str) -> Result<ir::hir::HirProgram, CodegenError> {
+        let pairs = parse_program(source).unwrap();
+        let program = build_ast(pairs).unwrap();
+        type_check(&program).unwrap();
+        codegen(&program)
+    }
+
+    #[test]
+    fn test_codegen_simple_function() {
+        let source = "fn add(Public Field<64> a, Public Field<64> b) -> Field<64> { return a + b; }";
+        let result = parse_type_check_and_codegen(source);
+        assert!(result.is_ok());
+        
+        let hir = result.unwrap();
+        assert_eq!(hir.functions.len(), 1);
+        assert_eq!(hir.functions[0].name, "add");
+    }
+
+    #[test]
+    fn test_codegen_arithmetic_operations() {
+        let source = "fn compute(Public Field<64> a, Public Field<64> b) -> Field<64> { return a + b * 2; }";
+        let result = parse_type_check_and_codegen(source);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_codegen_conditional() {
+        let source = "fn max(Public Field<64> a, Public Field<64> b) -> Field<64> { if a > b { return a; } else { return b; } }";
+        let result = parse_type_check_and_codegen(source);
+        assert!(result.is_ok());
+    }
+}
+

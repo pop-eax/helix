@@ -1,0 +1,10 @@
+// Struct example
+struct Point {
+    Field<64> x;
+    Field<64> y;
+}
+
+fn create_point(Public Field<64> x, Public Field<64> y) -> Point {
+    return Point { x: x, y: y };
+}
+

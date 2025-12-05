@@ -1,0 +1,5 @@
+// Comparison function
+fn is_greater(Public Field<64> a, Public Field<64> b) -> Bool {
+    return a > b;
+}
+

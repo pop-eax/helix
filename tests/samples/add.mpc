@@ -1,0 +1,5 @@
+// Simple addition function
+fn add(Public Field<64> a, Public Field<64> b) -> Field<64> {
+    return a + b;
+}
+

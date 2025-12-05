@@ -1,0 +1,9 @@
+[package]
+name = "ir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+bincode = "1.3"
+thiserror = { workspace = true }

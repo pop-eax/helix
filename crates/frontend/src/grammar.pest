@@ -1,0 +1,280 @@
+// MPC DSL Grammar for Pest Parser
+// Whitespace and comments are implicitly handled between tokens
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "//" ~ (!"\n" ~ ANY)* ~ "\n"? | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+// ============================================================================
+// Program Structure
+// ============================================================================
+
+program = { SOI ~ item* ~ EOI }
+
+item = { struct_def | function_def }
+
+// ============================================================================
+// Struct Definitions
+// ============================================================================
+
+struct_def = {
+    "struct" ~ identifier ~ "{" ~ struct_field* ~ "}"
+}
+
+struct_field = { type_expr ~ identifier ~ ";" }
+
+// ============================================================================
+// Function Definitions
+// ============================================================================
+
+function_def = {
+    "fn" ~ identifier ~ "(" ~ param_list? ~ ")" ~ "->" ~ type_expr ~ block
+}
+
+param_list = { param ~ ("," ~ param)* }
+
+param = { visibility ~ type_expr ~ identifier }
+
+// ============================================================================
+// Type System
+// ============================================================================
+
+type_expr = { array_type | base_type | struct_type }
+
+base_type = { field_type | bool_type }
+
+field_type = { "Field" ~ "<" ~ integer ~ ">" }
+
+bool_type = { "Bool" }
+
+array_type = { "Array" ~ "<" ~ type_expr ~ "," ~ integer ~ ">" }
+
+struct_type = { identifier }
+
+visibility = { "Public" | "Secret" }
+
+// ============================================================================
+// Statements
+// ============================================================================
+
+block = { "{" ~ statement* ~ "}" }
+
+statement = {
+    variable_decl ~ ";"
+  | assignment ~ ";"
+  | if_statement
+  | for_loop
+  | return_statement ~ ";"
+  | directive ~ ";"
+  | expr_statement ~ ";"
+}
+
+variable_decl = {
+    "let" ~ visibility ~ type_expr ~ identifier ~ ("=" ~ expression)?
+}
+
+assignment = { lvalue ~ "=" ~ expression }
+
+lvalue = {
+    identifier ~ (array_access | field_access)*
+}
+
+array_access = { "[" ~ expression ~ "]" }
+
+field_access = { "." ~ identifier }
+
+if_statement = {
+    "if" ~ expression ~ block ~ ("else" ~ block)?
+}
+
+for_loop = {
+    "for" ~ identifier ~ "in" ~ integer ~ ".." ~ integer ~ block
+}
+
+return_statement = { "return" ~ expression }
+
+expr_statement = { expression }
+
+// ============================================================================
+// Directives
+// ============================================================================
+
+directive = {
+    print_directive
+  | assert_directive
+  | abort_directive
+  | reveal_directive
+  | debug_directive
+}
+
+print_directive = {
+    "print" ~ "(" ~ expression_list? ~ ")"
+}
+
+assert_directive = {
+    "assert" ~ "(" ~ expression ~ ("," ~ string)? ~ ")"
+}
+
+abort_directive = {
+    "abort" ~ "(" ~ string ~ ")"
+}
+
+reveal_directive = {
+    "reveal" ~ "(" ~ identifier ~ ")"
+}
+
+debug_directive = {
+    "debug" ~ block
+}
+
+expression_list = { expression ~ ("," ~ expression)* }
+
+// ============================================================================
+// Expressions (with proper precedence)
+// ============================================================================
+
+expression = { logical_or }
+
+// Precedence levels (lowest to highest)
+
+logical_or = {
+    logical_and ~ ("||" ~ logical_and)*
+}
+
+logical_and = {
+    comparison ~ ("&&" ~ comparison)*
+}
+
+comparison = {
+    bitwise_or ~ (comparison_op ~ bitwise_or)?
+}
+
+comparison_op = {
+    "==" | "!=" | "<=" | ">=" | "<" | ">"
+}
+
+bitwise_or = {
+    bitwise_xor ~ ("|" ~ bitwise_xor)*
+}
+
+bitwise_xor = {
+    bitwise_and ~ ("^" ~ bitwise_and)*
+}
+
+bitwise_and = {
+    shift ~ ("&" ~ shift)*
+}
+
+shift = {
+    additive ~ (shift_op ~ additive)*
+}
+
+shift_op = { "<<" | ">>" }
+
+additive = {
+    multiplicative ~ (additive_op ~ multiplicative)*
+}
+
+additive_op = { "+" | "-" }
+
+multiplicative = {
+    unary ~ (multiplicative_op ~ unary)*
+}
+
+multiplicative_op = { "*" | "/" | "%" }
+
+unary = {
+    unary_op* ~ postfix
+}
+
+unary_op = { "-" | "!" | "~" }
+
+postfix = {
+    primary ~ (array_access | field_access)*
+}
+
+primary = {
+    literal
+  | array_literal
+  | struct_literal
+  | function_call
+  | identifier
+  | "(" ~ expression ~ ")"
+}
+
+literal = {
+    integer
+  | bool_literal
+}
+
+bool_literal = { "true" | "false" }
+
+array_literal = {
+    "[" ~ expression ~ ("," ~ expression)* ~ "]"
+}
+
+struct_literal = {
+    identifier ~ "{" ~ field_init_list ~ "}"
+}
+
+field_init_list = {
+    field_init ~ ("," ~ field_init)*
+}
+
+field_init = {
+    identifier ~ ":" ~ expression
+}
+
+function_call = {
+    identifier ~ "(" ~ argument_list? ~ ")"
+}
+
+argument_list = {
+    expression ~ ("," ~ expression)*
+}
+
+// ============================================================================
+// Lexical Tokens
+// ============================================================================
+
+identifier = @{
+    !keyword ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+integer = @{
+    ASCII_DIGIT+
+}
+
+string = @{
+    "\"" ~ string_inner ~ "\""
+}
+
+string_inner = @{
+    (!("\"" | "\\") ~ ANY)*
+}
+
+// ============================================================================
+// Keywords (reserved words)
+// ============================================================================
+
+keyword = {
+    "struct"
+  | "fn"
+  | "let"
+  | "if"
+  | "else"
+  | "for"
+  | "in"
+  | "return"
+  | "Field"
+  | "Bool"
+  | "Array"
+  | "Public"
+  | "Secret"
+  | "true"
+  | "false"
+  | "print"
+  | "assert"
+  | "abort"
+  | "reveal"
+  | "debug"
+}

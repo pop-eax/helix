@@ -1,0 +1,12 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ir = { path = "../ir" }
+
+pest = "2.7"
+pest_derive = "2.7"
+serde = { workspace = true }
+thiserror = { workspace = true }

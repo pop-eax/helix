@@ -1,0 +1,5 @@
+// Multiplication function
+fn multiply(Public Field<64> x, Secret Field<64> y) -> Field<64> {
+    return x * y;
+}
+
