@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use crate::hir::{self, *};
-use crate::lir::{self, CircuitBuilder, Metadata, Program, Statistics, WireId, PartyId, GateType};
+use crate::lir::{self, CircuitBuilder, Metadata, Program, Statistics, WireId, GateType};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -35,7 +35,6 @@ struct Lowerer {
     param_to_wire: HashMap<usize, WireId>, // Parameter index -> wire
     constant_wires: HashMap<HirConstant, WireId>,
     field_size: u64, // Current field size context
-    next_party_id: usize,
 }
 
 impl Lowerer {
@@ -46,7 +45,6 @@ impl Lowerer {
             param_to_wire: HashMap::new(),
             constant_wires: HashMap::new(),
             field_size: 64, // Default field size
-            next_party_id: 0,
         }
     }
 
@@ -65,10 +63,9 @@ impl Lowerer {
     }
 
     fn lower_function(&mut self, function: &HirFunction) -> LoweringResult<()> {
-        // Lower parameters as inputs
-        for (idx,   param) in function.params.iter().enumerate() {
+        // Lower parameters as inputs (party assignment left to VM/executor)
+        for (idx, param) in function.params.iter().enumerate() {
             let wire = self.builder.add_input(
-                PartyId(self.next_party_id),
                 self.convert_visibility(param.visibility),
                 Some(param.name.clone()),
             );

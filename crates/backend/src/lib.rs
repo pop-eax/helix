@@ -1,14 +1,11 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+// Backend crate - Virtual Machine and Backend implementations
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod clear;
+pub mod compiler;
+pub mod executor;
+pub mod vm;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use clear::ClearBackend;
+pub use compiler::compile_to_vm_instructions;
+pub use executor::execute_program;
+pub use vm::{Backend, BackendError, Instruction, VMState, VisibilityPair, WireValue};

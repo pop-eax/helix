@@ -47,7 +47,8 @@ pub struct Circuit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
     pub wire: WireId,
-    pub party: PartyId,
+    /// Party ID - set to None during lowering, assigned by VM/executor at runtime
+    pub party: Option<PartyId>,
     pub visibility: Visibility,
     pub name: Option<String>,  // For debugging
 }
@@ -141,11 +142,11 @@ impl CircuitBuilder {
         }
     }
     
-    /// Add an input wire from a party
-    pub fn add_input(&mut self, party: PartyId, visibility: Visibility, name: Option<String>) -> WireId {
+    /// Add an input wire (party is set to None, to be assigned by VM/executor)
+    pub fn add_input(&mut self, visibility: Visibility, name: Option<String>) -> WireId {
         let wire = WireId(self.next_wire);
         self.next_wire += 1;
-        self.inputs.push(Input { wire, party, visibility, name });
+        self.inputs.push(Input { wire, party: None, visibility, name });
         wire
     }
     
