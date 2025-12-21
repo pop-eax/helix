@@ -1,0 +1,16 @@
+[package]
+name = "helix-runner"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "runner"
+path = "src/main.rs"
+
+[dependencies]
+garbledc = { path = "../../crates/garbledc" }
+hex = "0.4.3"
+itertools = "0.14.0"
+
+
+

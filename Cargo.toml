@@ -5,7 +5,9 @@ members = [
     "crates/frontend",
     "crates/backend",
     "crates/crypto",
-    "bin/compiler"
+    "crates/garbledc",
+    "bin/compiler",
+    "bin/executor"
 ]
 resolver = "2"
 

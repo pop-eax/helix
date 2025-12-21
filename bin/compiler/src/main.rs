@@ -170,19 +170,16 @@ fn show_lir(input: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 fn debug_all(input: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(&input)?;
     
-    // AST
     println!("=== AST ===");
     let ast = parse_and_check(&source)?;
     println!("{}", frontend::display_program(&ast));
     println!();
     
-    // HIR
     println!("=== HIR ===");
     let hir = parse_and_codegen(&source)?;
     println!("{}", ir::hir_display::display_hir_program(&hir));
     println!();
     
-    // LIR
     println!("=== LIR ===");
     let metadata = create_metadata(&input);
     let lir = lower_hir_to_lir(&hir, metadata).map_err(|e| format!("Lowering error: {}", e))?;
@@ -198,15 +195,12 @@ fn compile_to_vm(input: PathBuf, output: Option<PathBuf>) -> Result<(), Box<dyn 
     let metadata = create_metadata(&input);
     let lir = lower_hir_to_lir(&hir, metadata).map_err(|e| format!("Lowering error: {}", e))?;
     
-    // Compile to VM instructions
     let instructions = compile_to_vm_instructions(&lir.circuit);
     
-    // Determine output path
     let output_path = output.unwrap_or_else(|| {
         input.with_extension("vm.json")
     });
     
-    // Serialize to JSON
     let json = serde_json::to_string_pretty(&instructions)?;
     fs::write(&output_path, json)?;
     
