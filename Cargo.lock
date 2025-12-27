@@ -88,15 +88,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backend"
-version = "0.1.0"
-dependencies = [
- "ir",
- "serde",
- "thiserror",
-]
-
-[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -246,8 +237,10 @@ name = "garbledc"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "ir",
  "itertools",
  "rand",
+ "runtime",
  "serde",
  "sha2",
 ]
@@ -305,10 +298,10 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "helix-compiler"
 version = "0.1.0"
 dependencies = [
- "backend",
  "clap",
  "frontend",
  "ir",
+ "runtime",
  "serde_json",
 ]
 
@@ -318,7 +311,9 @@ version = "0.1.0"
 dependencies = [
  "garbledc",
  "hex",
+ "ir",
  "itertools",
+ "runtime",
 ]
 
 [[package]]
@@ -514,6 +509,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "ir",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]

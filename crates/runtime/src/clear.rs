@@ -1,8 +1,5 @@
-// Clear (non-crypto) backend implementation
-// This backend performs plain evaluation without any cryptographic operations
-
 use crate::vm::{Backend, BackendError, Instruction, VMState, WireValue};
-use ir::lir::WireId;
+use ir::lir::{WireId, Visibility};
 
 /// Clear backend - plain evaluation without cryptography
 pub struct ClearBackend {
@@ -42,6 +39,27 @@ impl Backend for ClearBackend {
         "Clear"
     }
     
+    fn set_input(
+        &mut self,
+        wire: WireId,
+        value: u64,
+        visibility: Visibility,
+        state: &mut VMState,
+    ) -> Result<(), BackendError> {
+        // Clear backend just sets the wire value directly
+        state.set_wire(wire, WireValue::Clear(value), visibility);
+        Ok(())
+    }
+    
+    fn get_output(
+        &mut self,
+        wire: WireId,
+        state: &VMState,
+    ) -> Result<u64, BackendError> {
+        // Clear backend reads directly from state
+        self.get_clear_value(state, wire)
+    }
+
     fn execute_instruction(&mut self, instruction: &Instruction, state: &mut VMState) -> Result<(), BackendError> {
         match instruction {
             // Boolean gates

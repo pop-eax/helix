@@ -1,11 +1,7 @@
-// Virtual Machine for MPC Backend
-// Defines the minimal instruction set and VM interface
-
 use ir::lir::{WireId, Visibility};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Visibility pair for binary operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisibilityPair {
     pub left: Visibility,
@@ -17,7 +13,6 @@ impl VisibilityPair {
         Self { left, right }
     }
     
-    /// Get the output visibility (secret if either input is secret)
     pub fn output_visibility(&self) -> Visibility {
         match (self.left, self.right) {
             (Visibility::Secret, _) | (_, Visibility::Secret) => Visibility::Secret,
@@ -26,8 +21,6 @@ impl VisibilityPair {
     }
 }
 
-/// Minimal set of VM instructions
-/// These are the primitive operations that backends must implement
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction {
     // Boolean gates (minimal set: AND, XOR, NOT)
@@ -176,6 +169,24 @@ pub trait Backend {
     
     /// Get the name of this backend
     fn name(&self) -> &'static str;
+
+    /// Set an input wire value
+    /// Each backend can handle this differently (e.g., create labels, set shares, etc.)
+    fn set_input(
+        &mut self,
+        wire: WireId,
+        value: u64,
+        visibility: Visibility,
+        state: &mut VMState,
+    ) -> Result<(), BackendError>;
+    
+    /// Get an output wire value
+    /// Each backend can handle this differently (e.g., read from state, evaluate circuit, etc.)
+    fn get_output(
+        &mut self,
+        wire: WireId,
+        state: &VMState,
+    ) -> Result<u64, BackendError>;
 }
 
 /// Backend execution errors

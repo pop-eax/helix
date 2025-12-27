@@ -3,7 +3,7 @@ members = [
     "crates/common",
     "crates/ir",
     "crates/frontend",
-    "crates/backend",
+    "crates/runtime",
     "crates/crypto",
     "crates/garbledc",
     "bin/compiler",

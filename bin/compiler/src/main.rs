@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 use frontend::{parse_and_check, parse_and_codegen, FrontendError};
 use ir::{lower_hir_to_lir, Metadata, Statistics};
-use backend::{compile_to_vm_instructions, execute_program, ClearBackend};
+use runtime::{compile_to_vm_instructions, execute_program, ClearBackend};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;

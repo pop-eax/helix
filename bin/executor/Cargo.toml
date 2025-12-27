@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 garbledc = { path = "../../crates/garbledc" }
+runtime = {path = "../../crates/runtime"}
+ir = { path = "../../crates/ir" }
 hex = "0.4.3"
 itertools = "0.14.0"
 
