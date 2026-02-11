@@ -1,0 +1,10 @@
+[package]
+name = "bgw"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ark-bls12-381 = "0.5.0"
+ark-ff = "0.5.0"
+ark-std = {version="0.5.0", features = ["getrandom"]}
+ark-test-curves = {version="0.5.0", features = ["bls12_381_curve"]}
