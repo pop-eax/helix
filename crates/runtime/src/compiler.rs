@@ -52,13 +52,7 @@ fn gate_to_instruction(gate: &Gate, _circuit: &Circuit) -> Instruction {
             // For now, we'll treat it as a separate instruction or decompose it
             // For simplicity, let's add it as XOR(AND(NOT(a), NOT(b)), 1)
             // But since we don't have intermediate wires, we'll need to handle this differently
-            // For now, implement OR directly (can be optimized later)
-            let vis = get_visibility_pair(&gate.inputs, _circuit);
-            // Decompose OR: a OR b = NOT(AND(NOT(a), NOT(b)))
-            // This requires intermediate wires, so for now we'll add OR as a special case
-            // Actually, let's just use XOR pattern: a OR b = XOR(a, b) XOR AND(a, b)
-            // But that's complex. For clear backend, we can just compute directly
-            // Let's add a helper that computes OR
+            // For now, we leave 
             let vis = get_visibility_pair(&gate.inputs, _circuit);
             Instruction::Xor {
                 vis,

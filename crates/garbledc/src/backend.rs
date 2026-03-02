@@ -391,6 +391,7 @@ impl Backend for YaoBackend {
 
             self.circuit.add_input(&wire_name);
 
+            // should use OT here later
             if let Some(label) = self.circuit.get_label(&wire_name, bit) {
                 self.input_labels.insert(wire_name, label);
             }
@@ -401,6 +402,7 @@ impl Backend for YaoBackend {
         Ok(())
     }
 
+    // NOTE: in the future should fetch this over the network
     fn get_output(&mut self, wire: WireId, _state: &VMState) -> Result<u64, BackendError> {
         // Trigger evaluation if needed
         self.evaluate_circuit()?;

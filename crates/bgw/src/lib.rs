@@ -65,6 +65,8 @@ pub fn reconstruct_secret(shares: &Vec<(F, F)>) -> F {
 
 
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,12 +74,14 @@ mod tests {
     #[test]
     fn test_e2e() {
         let secret: F = rand_fr();
-        let polynomial = share_secret(secret, 20);
+        let threshold: u64 = 2000;
+        let polynomial = share_secret(secret, threshold.into());
         let mut shares:Vec<(F,F)> = Vec::new();
-        for i in 0..3 {
+        for i in 1..threshold+1 {
             shares.push(generate_share(&polynomial, i))
         }
         let reconstruted_secret = reconstruct_secret(&shares);
+        println!("{} {}", secret, reconstruted_secret);
         assert_eq!(reconstruted_secret, secret);
     }
 }
