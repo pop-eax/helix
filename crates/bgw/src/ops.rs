@@ -38,12 +38,7 @@ pub fn add_shares<F: PrimeField>(
     right: &[Share<F>],
 ) -> Result<PartyShares<F>, OpsError> {
     validate_shapes(left, right)?;
-    Ok(PartyShares::new(
-        left.iter()
-            .zip(right.iter())
-            .map(|((x, ly), (_, ry))| (*x, *ly + *ry))
-            .collect(),
-    ))
+    Ok(PartyShares::new(left.iter().zip(right).map(|(&a, &b)| a + b).collect()))
 }
 
 pub fn sub_shares<F: PrimeField>(
@@ -51,16 +46,11 @@ pub fn sub_shares<F: PrimeField>(
     right: &[Share<F>],
 ) -> Result<PartyShares<F>, OpsError> {
     validate_shapes(left, right)?;
-    Ok(PartyShares::new(
-        left.iter()
-            .zip(right.iter())
-            .map(|((x, ly), (_, ry))| (*x, *ly - *ry))
-            .collect(),
-    ))
+    Ok(PartyShares::new(left.iter().zip(right).map(|(&a, &b)| a - b).collect()))
 }
 
 pub fn scale_shares<F: PrimeField>(shares: &[Share<F>], k: F) -> PartyShares<F> {
-    PartyShares::new(shares.iter().map(|(x, y)| (*x, *y * k)).collect())
+    PartyShares::new(shares.iter().map(|&s| s * k).collect())
 }
 
 pub fn generate_beaver_triple<F: PrimeField, R: Rng + ?Sized>(
@@ -112,7 +102,22 @@ pub fn multiply_shares_with_triple<F: PrimeField>(
     Ok(PartyShares::new(
         out.as_slice()
             .iter()
-            .map(|(x_i, z_i)| (*x_i, *z_i + delta * eta))
+            .map(|&s| Share(s.0, s.1 + delta * eta))
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bls12_381::Fr;
+
+    #[test]
+    fn share_add_sub_mul_scalar() {
+        let a = Share(Fr::from(1u64), Fr::from(10u64));
+        let b = Share(Fr::from(1u64), Fr::from(22u64));
+        assert_eq!((a + b).1, Fr::from(32u64));
+        assert_eq!((a - b).1, Fr::from(10u64) - Fr::from(22u64));
+        assert_eq!((a * Fr::from(3u64)).1, Fr::from(30u64));
+    }
 }

@@ -44,7 +44,7 @@ pub fn generate_shares_from_poly<F: PrimeField>(
         .map(|i| {
             let x = F::from(i as u64);
             let y = eval_polynomial(coeffs, x);
-            (x, y)
+            Share(x, y)
         })
         .collect();
     Ok(PartyShares::new(shares))
@@ -71,10 +71,10 @@ pub fn reconstruct_secret<F: PrimeField>(shares: &[Share<F>]) -> Result<F, Shami
         return Err(ShamirError::EmptyShares);
     }
     let mut secret = F::zero();
-    for (i, (x_i, y_i)) in shares.iter().enumerate() {
+    for (i, Share(x_i, y_i)) in shares.iter().enumerate() {
         let mut num = F::one();
         let mut den = F::one();
-        for (j, (x_j, _)) in shares.iter().enumerate() {
+        for (j, Share(x_j, _)) in shares.iter().enumerate() {
             if i == j {
                 continue;
             }
