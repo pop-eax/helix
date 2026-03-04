@@ -4,38 +4,29 @@ use std::ops::{Add, Mul, Neg, Sub};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartyShares<F>(Vec<Share<F>>);
 
-/// A single party's share: `(x, y)` where `x` is the party index and `y` is the share value.
+/// A single party's share: just the y (share value). The x (party index)
+/// is implicit from the position in `PartyShares`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Share<F>(pub F, pub F);
+pub struct Share<F>(pub F);
 
 impl<F: PrimeField> Add for Share<F> {
     type Output = Self;
-    fn add(self, rhs: Self) -> Self {
-        debug_assert_eq!(self.0, rhs.0, "x-coordinates must match");
-        Share(self.0, self.1 + rhs.1)
-    }
+    fn add(self, rhs: Self) -> Self { Share(self.0 + rhs.0) }
 }
 
 impl<F: PrimeField> Sub for Share<F> {
     type Output = Self;
-    fn sub(self, rhs: Self) -> Self {
-        debug_assert_eq!(self.0, rhs.0, "x-coordinates must match");
-        Share(self.0, self.1 - rhs.1)
-    }
+    fn sub(self, rhs: Self) -> Self { Share(self.0 - rhs.0) }
 }
 
 impl<F: PrimeField> Mul<F> for Share<F> {
     type Output = Self;
-    fn mul(self, scalar: F) -> Self {
-        Share(self.0, self.1 * scalar)
-    }
+    fn mul(self, scalar: F) -> Self { Share(self.0 * scalar) }
 }
 
 impl<F: PrimeField> Neg for Share<F> {
     type Output = Self;
-    fn neg(self) -> Self {
-        Share(self.0, -self.1)
-    }
+    fn neg(self) -> Self { Share(-self.0) }
 }
 
 impl<F> PartyShares<F> {

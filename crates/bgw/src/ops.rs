@@ -6,7 +6,6 @@ use ark_std::rand::Rng;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpsError {
     LengthMismatch,
-    ShareXMismatch,
     Shamir(ShamirError),
 }
 
@@ -26,9 +25,6 @@ impl From<ShamirError> for OpsError {
 fn validate_shapes<F: PrimeField>(left: &[Share<F>], right: &[Share<F>]) -> Result<(), OpsError> {
     if left.len() != right.len() {
         return Err(OpsError::LengthMismatch);
-    }
-    if left.iter().zip(right.iter()).any(|(l, r)| l.0 != r.0) {
-        return Err(OpsError::ShareXMismatch);
     }
     Ok(())
 }
@@ -102,7 +98,7 @@ pub fn multiply_shares_with_triple<F: PrimeField>(
     Ok(PartyShares::new(
         out.as_slice()
             .iter()
-            .map(|&s| Share(s.0, s.1 + delta * eta))
+            .map(|&s| Share(s.0 + delta * eta))
             .collect(),
     ))
 }
@@ -114,10 +110,10 @@ mod tests {
 
     #[test]
     fn share_add_sub_mul_scalar() {
-        let a = Share(Fr::from(1u64), Fr::from(10u64));
-        let b = Share(Fr::from(1u64), Fr::from(22u64));
-        assert_eq!((a + b).1, Fr::from(32u64));
-        assert_eq!((a - b).1, Fr::from(10u64) - Fr::from(22u64));
-        assert_eq!((a * Fr::from(3u64)).1, Fr::from(30u64));
+        let a = Share(Fr::from(10u64));
+        let b = Share(Fr::from(22u64));
+        assert_eq!((a + b).0, Fr::from(32u64));
+        assert_eq!((a - b).0, Fr::from(10u64) - Fr::from(22u64));
+        assert_eq!((a * Fr::from(3u64)).0, Fr::from(30u64));
     }
 }

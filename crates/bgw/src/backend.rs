@@ -64,8 +64,8 @@ impl BgwBackend {
     }
 
     fn constant_shares(&self, value: Fr) -> PartyShares<Fr> {
-        let shares: Vec<Share<Fr>> = (1..=self.config.parties)
-            .map(|i| Share(Fr::from(i as u64), value))
+        let shares: Vec<Share<Fr>> = (0..self.config.parties)
+            .map(|_| Share(value))
             .collect();
         PartyShares::new(shares)
     }
