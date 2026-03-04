@@ -1,0 +1,16 @@
+[package]
+name = "net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio      = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures    = "0.3"
+serde      = { workspace = true }
+bincode    = { workspace = true }
+bytes      = "1"
+anyhow     = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync"] }
