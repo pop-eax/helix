@@ -48,13 +48,8 @@ fn gate_to_instruction(gate: &Gate, _circuit: &Circuit) -> Instruction {
             }
         }
         GateType::Or => {
-            // OR is not in minimal set, but we can compile it
-            // For now, we'll treat it as a separate instruction or decompose it
-            // For simplicity, let's add it as XOR(AND(NOT(a), NOT(b)), 1)
-            // But since we don't have intermediate wires, we'll need to handle this differently
-            // For now, we leave 
             let vis = get_visibility_pair(&gate.inputs, _circuit);
-            Instruction::Xor {
+            Instruction::Or {
                 vis,
                 input1: gate.inputs[0],
                 input2: gate.inputs[1],

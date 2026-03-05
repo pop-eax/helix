@@ -87,11 +87,15 @@ impl Backend for ClearBackend {
                 state.set_wire(*output, WireValue::Clear(result), *vis);
                 Ok(())
             }
-            
-            // Note: OR gate is not in the minimal instruction set
-            // It should be decomposed, but for clear backend we can handle it if needed
-            // For now, we don't have an OR instruction in the VM
-            
+
+            Instruction::Or { vis, input1, input2, output } => {
+                let v1 = self.get_clear_value(state, *input1)?;
+                let v2 = self.get_clear_value(state, *input2)?;
+                let result = ((v1 != 0) || (v2 != 0)) as u64;
+                state.set_wire(*output, WireValue::Clear(result), vis.output_visibility());
+                Ok(())
+            }
+
             // Arithmetic gates
             Instruction::Add { vis, input1, input2, output, field_size } => {
                 let v1 = self.get_clear_value(state, *input1)?;

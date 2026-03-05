@@ -114,6 +114,24 @@ fn lower_xor(
     Ok(())
 }
 
+fn lower_or(
+    program: &mut BgwProgram,
+    input1: WireId,
+    input2: WireId,
+    output: WireId,
+) -> Result<(), BackendError> {
+    // OR(a,b) = a + b - a*b  (correct for boolean inputs 0/1)
+    ensure_input_node(program, input1);
+    ensure_input_node(program, input2);
+    let a = get_wire_node(program, input1)?;
+    let b = get_wire_node(program, input2)?;
+    let ab = program.push_node(BgwOp::Mul { a, b });
+    let apb = program.push_node(BgwOp::Add { a, b });
+    let out = program.push_node(BgwOp::Sub { a: apb, b: ab });
+    program.set_wire_node(output, out);
+    Ok(())
+}
+
 fn lower_add_constant(
     program: &mut BgwProgram,
     input: WireId,
@@ -179,6 +197,12 @@ pub fn lower_instruction(
             output,
             ..
         } => lower_xor(program, *input1, *input2, *output),
+        Instruction::Or {
+            input1,
+            input2,
+            output,
+            ..
+        } => lower_or(program, *input1, *input2, *output),
         Instruction::Not { input, output, .. } => lower_not(program, *input, *output),
         Instruction::Add {
             input1,
@@ -326,6 +350,25 @@ mod tests {
         assert!(p.nodes.iter().any(|op| matches!(op, BgwOp::Add { .. })));
         assert!(p.nodes.iter().filter(|op| matches!(op, BgwOp::Mul { .. })).count() >= 2);
         assert!(p.nodes.iter().any(|op| matches!(op, BgwOp::Sub { .. })));
+    }
+
+    #[test]
+    fn lower_or_maps_to_add_sub_mul() {
+        let mut p = BgwProgram::default();
+        lower_instruction(
+            &mut p,
+            &Instruction::Or {
+                vis: VisibilityPair::new(Visibility::Secret, Visibility::Secret),
+                input1: WireId(0),
+                input2: WireId(1),
+                output: WireId(2),
+            },
+        )
+        .unwrap();
+        assert!(p.nodes.iter().any(|op| matches!(op, BgwOp::Mul { .. })));
+        assert!(p.nodes.iter().any(|op| matches!(op, BgwOp::Add { .. })));
+        assert!(p.nodes.iter().any(|op| matches!(op, BgwOp::Sub { .. })));
+        assert!(p.get_wire_node(WireId(2)).is_some());
     }
 
     #[test]

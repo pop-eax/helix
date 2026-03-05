@@ -23,8 +23,7 @@ impl VisibilityPair {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Instruction {
-    // Boolean gates (minimal set: AND, XOR, NOT)
-    // OR can be built from AND and NOT: a OR b = NOT(AND(NOT(a), NOT(b)))
+    // Boolean gates
     And {
         vis: VisibilityPair,
         input1: WireId,
@@ -32,6 +31,12 @@ pub enum Instruction {
         output: WireId,
     },
     Xor {
+        vis: VisibilityPair,
+        input1: WireId,
+        input2: WireId,
+        output: WireId,
+    },
+    Or {
         vis: VisibilityPair,
         input1: WireId,
         input2: WireId,

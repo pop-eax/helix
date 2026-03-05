@@ -145,7 +145,8 @@ impl Backend for BgwBackend {
 
         match instruction {
             Instruction::And { vis, output, .. }
-            | Instruction::Xor { vis, output, .. } => {
+            | Instruction::Xor { vis, output, .. }
+            | Instruction::Or { vis, output, .. } => {
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
             Instruction::Not { vis, output, .. } => {

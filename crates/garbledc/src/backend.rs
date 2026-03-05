@@ -70,6 +70,21 @@ impl YaoBackend {
         }
     }
 
+    fn build_or(&mut self, in1: WireId, in2: WireId, out: WireId) {
+        self.init_wire(in1);
+        self.init_wire(in2);
+        self.init_wire(out);
+
+        for bit_idx in 0..self.bit_width {
+            let w1 = self.wire_bit_name(in1, bit_idx);
+            let w2 = self.wire_bit_name(in2, bit_idx);
+            let wo = self.wire_bit_name(out, bit_idx);
+
+            self.circuit.add_gate(or_logic(), &[&w1, &w2], &wo);
+            self.circuit.add_output(&wo);
+        }
+    }
+
     fn build_not(&mut self, input: WireId, out: WireId) {
         self.init_wire(input);
         self.init_wire(out);
@@ -444,6 +459,12 @@ impl Backend for YaoBackend {
             Instruction::Not { vis, input, output } => {
                 self.build_not(*input, *output);
                 state.set_wire(*output, WireValue::Secret, *vis);
+                Ok(())
+            }
+
+            Instruction::Or { vis, input1, input2, output } => {
+                self.build_or(*input1, *input2, *output);
+                state.set_wire(*output, WireValue::Secret, vis.output_visibility());
                 Ok(())
             }
 
