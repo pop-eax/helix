@@ -192,6 +192,13 @@ pub trait Backend {
         wire: WireId,
         state: &VMState,
     ) -> Result<u64, BackendError>;
+
+    /// Returns pending outgoing messages (party_id, payload) and clears the internal queue.
+    /// Backends that require network communication between rounds should override this.
+    fn take_outgoing(&mut self) -> Vec<(usize, Vec<u8>)> { vec![] }
+
+    /// Delivers incoming messages from other parties so execution can resume.
+    fn receive_replies(&mut self, _messages: Vec<(usize, Vec<u8>)>) -> Result<(), BackendError> { Ok(()) }
 }
 
 /// Backend execution errors
