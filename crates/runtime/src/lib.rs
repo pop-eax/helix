@@ -9,6 +9,6 @@ pub mod vm;
 pub use clear::ClearBackend;
 pub use compiler::compile_to_vm_instructions;
 pub use executor::execute_program;
-pub use runner::{Runner, Step};
+pub use runner::{Runner, RunnerError, Step};
 pub use vm::{Backend, BackendError, Instruction, VMState, VisibilityPair, WireValue};
 pub use ir::{Visibility};
