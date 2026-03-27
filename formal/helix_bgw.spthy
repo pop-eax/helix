@@ -1,0 +1,163 @@
+/*
+ * Helix MPC Framework — Formal Security Model
+ * BGW Protocol: Shamir Secret Sharing Input-Distribution Phase
+ *
+ * This Tamarin Prover theory models the security of the share
+ * distribution phase in the Helix BGW backend (crates/bgw).
+ *
+ * Protocol summary (n=3, threshold t=2):
+ *   1. Each party P holds a private input x_P.
+ *   2. P encodes its input as a degree-(t-1) Shamir share using fresh
+ *      randomness r:  share_P = mk_share(x_P, r)
+ *   3. P sends share_P to each other party over an authenticated channel.
+ *   4. Receiving parties collect shares and reconstruct the joint output.
+ *
+ * The symbolic function mk_share/2 is intentionally opaque (no rewrite
+ * equations), capturing the information-theoretic hiding property: a
+ * single share mk_share(x, r) cannot be inverted to recover x without
+ * knowing the randomness r.
+ *
+ * Zero Trust security objectives:
+ *   [ZT-1]  Never trust a channel: shares in transit are encrypted under
+ *           pairwise session keys established before communication.
+ *   [ZT-2]  Always verify identity: every received share must be
+ *           cryptographically attributed to a specific sender.
+ *   [ZT-3]  Assume breach: secrecy and authentication hold even if
+ *           up to t-1 parties are corrupted (passive adversary).
+ *
+ * Lemmas:
+ *   share_secrecy         — [ZT-1, ZT-3] Share values stay secret unless
+ *                           the sender's channel key is compromised.
+ *   share_authentication  — [ZT-2]       Every accepted share was sent by
+ *                           the claimed party, unless that party is corrupt.
+ *   reachable             — Sanity: honest execution can complete.
+ */
+
+theory Helix_BGW_Security
+begin
+
+builtins: symmetric-encryption
+
+functions: mk_share/2    /* mk_share(secret, nonce) — opaque share encoding */
+
+/* ──────────────────── Channel Setup ──────────────────── */
+
+/*
+ * Pairwise authenticated channels are established before any MPC
+ * computation begins (corresponds to Helix's net::Channel layer).
+ * Each ordered pair ($A → $B) gets a unique session key ~k.
+ */
+rule Setup_Auth_Channel:
+    [ Fr(~k) ]
+  --[ SetupChannel($A, $B, ~k) ]->
+    [ !AuthChan($A, $B, ~k) ]
+
+/* ──────────────────── Party Input ──────────────────── */
+
+/*
+ * A party commits to a private input ~x and generates fresh randomness ~r
+ * for the share polynomial.  Both values remain local until distribution.
+ *
+ * PartyState is persistent (!PartyState) so that:
+ *   (a) Tamarin has a single, acyclic origin for the fact — no loop.
+ *   (b) Distribute_Share need not re-emit it, removing the source of the
+ *       infinite backward-search induction the prover hits with a linear fact.
+ */
+rule Party_Has_Input:
+    [ Fr(~x), Fr(~r) ]
+  --[ HasInput($P, ~x) ]->
+    [ !PartyState($P, ~x, ~r) ]
+
+/* ──────────────────── Share Distribution ──────────────────── */
+
+/*
+ * Party $P reads its persistent state and sends one share to $Q.
+ * Because !PartyState is persistent, the rule can fire multiple times
+ * (once per recipient) without consuming the state, which is the
+ * intended semantics for sharing to several parties.
+ */
+rule Distribute_Share:
+    [ !PartyState($P, ~x, ~r),
+      !AuthChan($P, $Q, ~k) ]
+  --[ SendShare($P, $Q, mk_share(~x, ~r)) ]->
+    [ Out(senc(mk_share(~x, ~r), ~k)) ]
+
+/* ──────────────────── Share Receipt ──────────────────── */
+
+/*
+ * Party $Q decrypts an incoming message using the channel key ~k shared
+ * with $P.  On success, the received value is attributed to $P.
+ */
+rule Accept_Share:
+    [ In(senc(share, k)),
+      !AuthChan($P, $Q, k) ]
+  --[ RecvShare($P, $Q, share),
+      Authentic($P, $Q, share) ]->
+    [ HoldShare($Q, $P, share) ]
+
+/* ──────────────────── Adversary Corruption ──────────────────── */
+
+/*
+ * Models a passive (honest-but-curious) adversary that can compromise
+ * a party's outgoing channel key.  Firing Corrupt($A) gives the adversary
+ * the key ~k for $A → $B, enabling decryption of $A's outgoing shares.
+ */
+rule Corrupt_Party:
+    [ !AuthChan($A, $B, ~k) ]
+  --[ Corrupt($A) ]->
+    [ Out(~k) ]
+
+/* ──────────────────── Security Lemmas ──────────────────── */
+
+/*
+ * [ZT-1, ZT-3] Share Secrecy
+ *
+ * A share sent by party $P remains unknown to the adversary unless $P's
+ * channel key is leaked (i.e., $P is corrupted).
+ *
+ * In BGW(t=2, n=3) this captures the t-1 = 1 corruption bound: the
+ * adversary observing at most one share learns nothing about the secret.
+ *
+ * Expected result: verified
+ */
+lemma share_secrecy:
+  "All P Q share #i #j.
+     SendShare(P, Q, share) @ i &
+     K(share) @ j
+     ==> Ex #c. Corrupt(P) @ c"
+
+/*
+ * [ZT-2] Share Authentication
+ *
+ * If party $Q accepts a share attributed to $P, and $P has not been
+ * corrupted, then $P must have sent that exact share before $Q received it.
+ * This enforces the Zero Trust principle: never accept an unverified identity.
+ *
+ * Without authenticated channels (plain TCP, as in the current net::Channel
+ * implementation), this lemma does NOT hold — a counterexample trace would
+ * show the adversary injecting a forged share.
+ *
+ * Expected result: verified
+ */
+lemma share_authentication:
+  "All P Q share #i.
+     Authentic(P, Q, share) @ i &
+     not (Ex #c. Corrupt(P) @ c)
+     ==> Ex #j. SendShare(P, Q, share) @ j & #j < #i"
+
+/*
+ * Sanity / Reachability
+ *
+ * An honest execution where $P sends a share and $Q receives it must be
+ * possible (protocol liveness).
+ *
+ * Expected result: verified (exists-trace)
+ */
+lemma share_exchange_reachable:
+  exists-trace
+  "Ex P Q share #i #j.
+     SendShare(P, Q, share) @ i &
+     RecvShare(P, Q, share) @ j &
+     #i < #j"
+
+end

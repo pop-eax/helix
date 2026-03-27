@@ -1,0 +1,142 @@
+theory Helix_BGW_Security
+
+begin
+
+// Function signature and definition of the equational theory E
+
+functions: fst/1, mk_share/2, pair/2, sdec/2, senc/2, snd/1
+equations:
+    fst(<x.1, x.2>) = x.1,
+    sdec(senc(x.1, x.2), x.2) = x.1,
+    snd(<x.1, x.2>) = x.2
+
+rule (modulo E) Setup_Auth_Channel:
+   [ Fr( ~k ) ]
+  --[ SetupChannel( $A, $B, ~k ) ]->
+   [ !AuthChan( $A, $B, ~k ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Party_Has_Input:
+   [ Fr( ~x ), Fr( ~r ) ]
+  --[ HasInput( $P, ~x ) ]->
+   [ !PartyState( $P, ~x, ~r ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Distribute_Share:
+   [ !PartyState( $P, ~x, ~r ), !AuthChan( $P, $Q, ~k ) ]
+  --[ SendShare( $P, $Q, mk_share(~x, ~r) ) ]->
+   [ Out( senc(mk_share(~x, ~r), ~k) ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Accept_Share:
+   [ In( senc(share, k) ), !AuthChan( $P, $Q, k ) ]
+  --[ RecvShare( $P, $Q, share ), Authentic( $P, $Q, share ) ]->
+   [ HoldShare( $Q, $P, share ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) Corrupt_Party:
+   [ !AuthChan( $A, $B, ~k ) ] --[ Corrupt( $A ) ]-> [ Out( ~k ) ]
+
+  /* has exactly the trivial AC variant */
+
+lemma share_secrecy:
+  all-traces
+  "∀ P Q share #i #j.
+    ((SendShare( P, Q, share ) @ #i) ∧ (K( share ) @ #j)) ⇒
+    (∃ #c. Corrupt( P ) @ #c)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ P Q share #i #j.
+  (SendShare( P, Q, share ) @ #i) ∧ (K( share ) @ #j)
+ ∧
+  ∀ #c. (Corrupt( P ) @ #c) ⇒ ⊥"
+*/
+simplify
+solve( !PartyState( $P, ~x, ~r ) ▶₀ #i )
+  case Party_Has_Input
+  solve( !AuthChan( $P, $Q, ~k ) ▶₁ #i )
+    case Setup_Auth_Channel
+    solve( !KU( mk_share(~x, ~r) ) @ #vk )
+      case Distribute_Share
+      solve( !KU( ~k.1 ) @ #vk.1 )
+        case Corrupt_Party
+        by contradiction /* from formulas */
+      qed
+    next
+      case c_mk_share
+      by solve( !KU( ~x ) @ #vk.1 )
+    qed
+  qed
+qed
+
+lemma share_authentication:
+  all-traces
+  "∀ P Q share #i.
+    ((Authentic( P, Q, share ) @ #i) ∧ (¬(∃ #c. Corrupt( P ) @ #c))) ⇒
+    (∃ #j. (SendShare( P, Q, share ) @ #j) ∧ (#j < #i))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ P Q share #i.
+  (Authentic( P, Q, share ) @ #i)
+ ∧
+  (∀ #c. (Corrupt( P ) @ #c) ⇒ ⊥) ∧
+  (∀ #j. (SendShare( P, Q, share ) @ #j) ⇒ ¬(#j < #i))"
+*/
+simplify
+solve( !AuthChan( $P, $Q, k ) ▶₁ #i )
+  case Setup_Auth_Channel
+  solve( !KU( senc(share, ~k) ) @ #vk )
+    case Distribute_Share
+    by contradiction /* from formulas */
+  next
+    case c_senc
+    solve( !KU( ~k ) @ #vk.2 )
+      case Corrupt_Party
+      by contradiction /* from formulas */
+    qed
+  qed
+qed
+
+lemma share_exchange_reachable:
+  exists-trace
+  "∃ P Q share #i #j.
+    ((SendShare( P, Q, share ) @ #i) ∧
+     (RecvShare( P, Q, share ) @ #j)) ∧
+    (#i < #j)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ P Q share #i #j.
+  (SendShare( P, Q, share ) @ #i) ∧ (RecvShare( P, Q, share ) @ #j)
+ ∧
+  #i < #j"
+*/
+simplify
+solve( !PartyState( $P, ~x, ~r ) ▶₀ #i )
+  case Party_Has_Input
+  solve( !AuthChan( $P, $Q, ~k ) ▶₁ #i )
+    case Setup_Auth_Channel
+    solve( !AuthChan( $P, $Q, k.1 ) ▶₁ #j )
+      case Setup_Auth_Channel
+      solve( !KU( senc(mk_share(~x, ~r), ~k.1) ) @ #vk )
+        case Distribute_Share
+        SOLVED // trace found
+      qed
+    qed
+  qed
+qed
+
+/* All wellformedness checks were successful. */
+
+/*
+Generated from:
+Tamarin version 1.12.0
+Maude version 3.5.1
+Git revision: UNKNOWN, branch: UNKNOWN
+Compiled at: 2026-03-21 01:32:15.985570759 UTC
+*/
+
+end
