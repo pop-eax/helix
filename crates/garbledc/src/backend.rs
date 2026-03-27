@@ -331,6 +331,29 @@ impl YaoBackend {
         }
     }
 
+    /// Return the label pair `[label₀, label₁]` for one bit of a wire.
+    ///
+    /// Used by the garbler to supply OT messages for evaluator-owned wires.
+    /// Returns `None` if the wire/bit has not been initialised yet.
+    pub fn wire_label_pair(&self, wire: WireId, bit_idx: usize) -> Option<[u128; 2]> {
+        let name = self.wire_bit_name(wire, bit_idx);
+        self.circuit.labels.get(&name).copied()
+    }
+
+    /// Register an evaluator-owned wire as a circuit input (creates its labels
+    /// without selecting active labels — those come from OT).
+    pub fn register_evaluator_wire(&mut self, wire: WireId) {
+        for bit_idx in 0..self.bit_width {
+            let wire_name = self.wire_bit_name(wire, bit_idx);
+            self.circuit.get_or_create_labels(&wire_name);
+            self.circuit.add_input(&wire_name);
+        }
+    }
+
+    pub fn bit_width(&self) -> usize {
+        self.bit_width
+    }
+
     /// Assign active input labels for `wire` based on the plaintext `value`.
     ///
     /// Used by the garbler to inject the evaluator's input labels (received

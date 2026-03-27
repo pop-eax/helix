@@ -156,13 +156,19 @@ fn print_outputs(outputs: &[(WireId, u64)]) {
 // ---- 2-party Yao (networked) ----
 
 /// Message sent from garbler (party 0) to evaluator (party 1).
+///
+/// The evaluator's active input labels are NOT included here — they are
+/// delivered privately via OT (see `ot_ciphertexts`).
 #[derive(Serialize, Deserialize)]
 struct GarblerMsg {
     garbled_circuit: garbledc::circuit::Circuit,
-    /// Active input labels: one selected label per input bit wire.
-    active_labels: HashMap<String, u128>,
+    /// Garbler's own active input labels (one per bit wire).
+    garbler_active_labels: HashMap<String, u128>,
     /// Both labels per output bit wire so the evaluator can decode.
     output_label_pairs: HashMap<String, [u128; 2]>,
+    /// OT round 3: encrypted label pairs for every evaluator input bit.
+    /// Index order matches the evaluator's OT A-point messages.
+    ot_ciphertexts: Vec<(u128, u128)>,
 }
 
 async fn run_yao_two_party(
@@ -196,7 +202,7 @@ async fn run_yao_two_party(
     }
 }
 
-/// Party 0 — builds and garbles the circuit, sends it to party 1.
+/// Party 0 — builds and garbles the circuit, runs OT for party 1's inputs.
 async fn garbler_run(
     program: &Program,
     my_value: u64,
@@ -204,6 +210,7 @@ async fn garbler_run(
     network: &mut net::Network,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use runtime::{compile_to_vm_instructions, vm::{VMState, Backend}};
+    use garbledc::ot::OTSender;
 
     // Build circuit structure by running all gate instructions.
     let mut backend = garbledc::backend::YaoBackend::new(bits);
@@ -229,24 +236,53 @@ async fn garbler_run(
     let my_wire = program.circuit.inputs[0].wire;
     backend.set_input(my_wire, my_value, runtime::Visibility::Secret, &mut state)?;
 
-    // Receive evaluator's plaintext input.
-    let eval_value: u64 = network.recv(1).await?;
-    eprintln!("[garbler] received evaluator input (simplified no-OT)");
-
-    // Set evaluator's input labels (party 1 owns circuit input[1]).
+    // Register evaluator's wire so its labels exist in the circuit.
     let eval_wire = program.circuit.inputs[1].wire;
-    backend.assign_input_labels(eval_wire, eval_value);
+    backend.register_evaluator_wire(eval_wire);
 
-    // Garble and extract the circuit bundle.
-    let (garbled_circuit, active_labels, output_label_pairs) = backend.finalize_garbler();
+    // ---- OT for evaluator's inputs ----
+    //
+    // For each bit of the evaluator's wire, we have (label₀, label₁).
+    // OT lets the evaluator obtain label_{σ} without us learning σ.
 
-    // Send everything to the evaluator.
+    let ot_messages: Vec<(u128, u128)> = (0..bits)
+        .map(|bit_idx| {
+            let [l0, l1] = backend
+                .wire_label_pair(eval_wire, bit_idx)
+                .expect("evaluator wire labels must exist");
+            (l0, l1)
+        })
+        .collect();
+
+    // Round 1: generate and send A-points.
+    let (ot_sender, a_bytes) = OTSender::setup(bits);
+    network.send(1, &a_bytes).await?;
+    eprintln!("[garbler] OT round 1 sent ({} A-points)", bits);
+
+    // Round 2: receive B-points from evaluator.
+    let b_bytes: Vec<[u8; 32]> = network.recv(1).await?;
+    eprintln!("[garbler] OT round 2 received");
+
+    // Round 3: compute and bundle ciphertexts with the garbled circuit.
+    let ot_ciphertexts = ot_sender.respond(&b_bytes, &ot_messages);
+
+    // Garble the circuit; finalize_garbler returns only the garbler's own
+    // active labels (evaluator's come from OT).
+    let (garbled_circuit, garbler_active_labels, output_label_pairs) =
+        backend.finalize_garbler();
+
     network
         .send(
             1,
-            &GarblerMsg { garbled_circuit, active_labels, output_label_pairs },
+            &GarblerMsg {
+                garbled_circuit,
+                garbler_active_labels,
+                output_label_pairs,
+                ot_ciphertexts,
+            },
         )
         .await?;
+    eprintln!("[garbler] sent garbled circuit bundle");
 
     // Receive the decoded result from the evaluator.
     let result: u64 = network.recv(1).await?;
@@ -254,22 +290,48 @@ async fn garbler_run(
     Ok(())
 }
 
-/// Party 1 — receives the garbled circuit, evaluates, decodes.
+/// Party 1 — participates in OT to obtain its input labels, then evaluates.
 async fn evaluator_run(
     program: &Program,
     my_value: u64,
     bits: usize,
     network: &mut net::Network,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Send our plaintext input to the garbler (simplified, no OT).
-    network.send(0, &my_value).await?;
+    use garbledc::ot::OTReceiver;
 
-    // Receive the garbled circuit bundle.
+    // ---- OT for our own inputs ----
+    //
+    // Derive choice bits from our plaintext input (LSB first).
+    let choices: Vec<bool> = (0..bits).map(|i| (my_value >> i) & 1 == 1).collect();
+
+    // Round 2: receive A-points from garbler.
+    let a_bytes: Vec<[u8; 32]> = network.recv(0).await?;
+    eprintln!("[evaluator] OT round 1 received");
+
+    // Compute B-points based on our choice bits.
+    let (ot_receiver, b_bytes) = OTReceiver::choose(&a_bytes, &choices);
+    network.send(0, &b_bytes).await?;
+    eprintln!("[evaluator] OT round 2 sent");
+
+    // Receive the garbled circuit bundle (which includes OT round 3).
     let msg: GarblerMsg = network.recv(0).await?;
     eprintln!("[evaluator] received garbled circuit ({} gates)", msg.garbled_circuit.gates.len());
 
-    // Evaluate.
-    let results = msg.garbled_circuit.evaluate(msg.active_labels);
+    // Decrypt our input labels via OT round 3.
+    let my_labels: Vec<u128> = ot_receiver.finish(&msg.ot_ciphertexts);
+
+    // Build the evaluator's input wire name → active label map.
+    let eval_wire = program.circuit.inputs[1].wire;
+    let eval_active: HashMap<String, u128> = (0..bits)
+        .map(|i| (format!("w{}_b{}", eval_wire.0, i), my_labels[i]))
+        .collect();
+
+    // Merge garbler's labels and our OT labels for evaluation.
+    let mut active_labels = msg.garbler_active_labels;
+    active_labels.extend(eval_active);
+
+    // Evaluate the garbled circuit.
+    let results = msg.garbled_circuit.evaluate(active_labels);
 
     // Decode each output wire (bit by bit, then reconstruct u64).
     let mut output_values: Vec<u64> = Vec::new();
