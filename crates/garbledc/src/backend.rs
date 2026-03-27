@@ -331,6 +331,41 @@ impl YaoBackend {
         }
     }
 
+    /// Assign active input labels for `wire` based on the plaintext `value`.
+    ///
+    /// Used by the garbler to inject the evaluator's input labels (received
+    /// in plaintext, no OT) without touching `VMState`.
+    pub fn assign_input_labels(&mut self, wire: WireId, value: u64) {
+        self.init_wire(wire);
+        for bit_idx in 0..self.bit_width {
+            let bit = ((value >> bit_idx) & 1) as u8;
+            let wire_name = self.wire_bit_name(wire, bit_idx);
+            self.circuit.add_input(&wire_name);
+            if let Some(label) = self.circuit.get_label(&wire_name, bit) {
+                self.input_labels.insert(wire_name, label);
+            }
+        }
+    }
+
+    /// Garble the circuit and return everything the evaluator needs:
+    ///
+    /// - The garbled `Circuit` (gates carry their garbled tables).
+    /// - The active input labels (one selected label per input bit wire).
+    /// - The output label pairs (both `label[0]` and `label[1]` per output bit
+    ///   wire) so the evaluator can decode the final result locally.
+    pub fn finalize_garbler(
+        &mut self,
+    ) -> (Circuit, std::collections::HashMap<String, u128>, std::collections::HashMap<String, [u128; 2]>) {
+        self.circuit.garble();
+        let output_label_pairs = self
+            .circuit
+            .outputs
+            .iter()
+            .filter_map(|name| self.circuit.labels.get(name).map(|&p| (name.clone(), p)))
+            .collect();
+        (self.circuit.clone(), self.input_labels.clone(), output_label_pairs)
+    }
+
     fn evaluate_circuit(&mut self) -> Result<(), BackendError> {
         if self.garbled {
             return Ok(());

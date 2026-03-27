@@ -628,11 +628,15 @@ dependencies = [
 name = "helix-runner"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bgw",
  "clap",
  "garbledc",
  "ir",
+ "net",
  "runtime",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

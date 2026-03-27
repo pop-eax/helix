@@ -9,7 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 garbledc = { path = "../../crates/garbledc" }
-runtime = {path = "../../crates/runtime"}
+runtime = { path = "../../crates/runtime" }
 ir = { path = "../../crates/ir" }
 bgw = { path = "../../crates/bgw" }
+net = { path = "../../crates/net" }
 clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
+anyhow = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
