@@ -199,6 +199,42 @@ pub trait Backend {
 
     /// Delivers incoming messages from other parties so execution can resume.
     fn receive_replies(&mut self, _messages: Vec<(usize, Vec<u8>)>) -> Result<(), BackendError> { Ok(()) }
+
+    /// Called when THIS party is the owner of `wire`.
+    ///
+    /// Returns a `Vec` of length `n_parties` where element `i` is the serialized
+    /// share that should be sent to party `i`.  The default broadcasts the raw
+    /// 8-byte little-endian encoding of `value` to every party (suitable for
+    /// the clear backend where all parties see the same value).
+    fn share_input(
+        &mut self,
+        _wire: WireId,
+        value: u64,
+        n_parties: usize,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        Ok(vec![value.to_le_bytes().to_vec(); n_parties])
+    }
+
+    /// Called to deliver this party's share of `wire` (owned by another party,
+    /// or by self after splitting via [`share_input`]).
+    ///
+    /// The default interprets the share as a little-endian u64 and stores it as
+    /// a `Clear` wire value — sufficient for the clear backend.
+    fn receive_input_share(
+        &mut self,
+        wire: WireId,
+        visibility: Visibility,
+        share: Vec<u8>,
+        state: &mut VMState,
+    ) -> Result<(), BackendError> {
+        let bytes: [u8; 8] = share.try_into().map_err(|_| {
+            BackendError::BackendError(
+                "default receive_input_share expects an 8-byte share".into(),
+            )
+        })?;
+        state.set_wire(wire, WireValue::Clear(u64::from_le_bytes(bytes)), visibility);
+        Ok(())
+    }
 }
 
 /// Backend execution errors
