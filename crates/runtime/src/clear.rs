@@ -148,6 +148,20 @@ impl Backend for ClearBackend {
                 Ok(())
             }
             
+            Instruction::LessThan { vis, input1, input2, output } => {
+                let v1 = self.get_clear_value(state, *input1)?;
+                let v2 = self.get_clear_value(state, *input2)?;
+                state.set_wire(*output, WireValue::Clear((v1 < v2) as u64), vis.output_visibility());
+                Ok(())
+            }
+
+            Instruction::Equal { vis, input1, input2, output } => {
+                let v1 = self.get_clear_value(state, *input1)?;
+                let v2 = self.get_clear_value(state, *input2)?;
+                state.set_wire(*output, WireValue::Clear((v1 == v2) as u64), vis.output_visibility());
+                Ok(())
+            }
+
             // Constant operations
             Instruction::Constant { value, output, field_size, visibility } => {
                 let result = self.reduce(*value, *field_size);

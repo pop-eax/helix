@@ -157,6 +157,24 @@ fn gate_to_instruction(gate: &Gate, _circuit: &Circuit) -> Instruction {
                 field_size: *field_size,
             }
         }
+        GateType::LessThan => {
+            let vis = get_visibility_pair(&gate.inputs, _circuit);
+            Instruction::LessThan {
+                vis,
+                input1: gate.inputs[0],
+                input2: gate.inputs[1],
+                output: gate.output,
+            }
+        }
+        GateType::Equal => {
+            let vis = get_visibility_pair(&gate.inputs, _circuit);
+            Instruction::Equal {
+                vis,
+                input1: gate.inputs[0],
+                input2: gate.inputs[1],
+                output: gate.output,
+            }
+        }
     }
 }
 

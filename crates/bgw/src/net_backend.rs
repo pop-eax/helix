@@ -272,6 +272,14 @@ impl Backend for BgwNetBackend {
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
 
+            Instruction::LessThan { .. } | Instruction::Equal { .. } => {
+                return Err(BackendError::BackendError(
+                    "comparison gates require the Yao backend (garbled circuits); \
+                     not supported in arithmetic BGW MPC"
+                        .into(),
+                ));
+            }
+
             other => {
                 return Err(BackendError::BackendError(format!(
                     "BgwNetBackend: instruction {other:?} not supported"

@@ -86,6 +86,20 @@ pub enum Instruction {
         field_size: u64,
     },
     
+    // Comparison gates (output is 1-bit boolean stored in bit 0)
+    LessThan {
+        vis: VisibilityPair,
+        input1: WireId,
+        input2: WireId,
+        output: WireId,
+    },
+    Equal {
+        vis: VisibilityPair,
+        input1: WireId,
+        input2: WireId,
+        output: WireId,
+    },
+
     // Constant operations
     Constant {
         value: u64,

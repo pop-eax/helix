@@ -102,6 +102,12 @@ pub enum GateType {
     AddConstant { constant: u64, field_size: u64 },
     MulConstant { constant: u64, field_size: u64 },
     SubConstant { constant: u64, field_size: u64 },
+
+    // Comparison gates (output is 1-bit boolean in bit 0 of the output wire)
+    /// Unsigned N-bit less-than: output bit 0 = 1 iff input1 < input2
+    LessThan,
+    /// N-bit equality: output bit 0 = 1 iff input1 == input2
+    Equal,
 }
 
 // ============================================================================

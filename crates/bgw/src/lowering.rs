@@ -250,6 +250,11 @@ pub fn lower_instruction(
         Instruction::Mod { .. } => Err(BackendError::BackendError(
             "Instruction Mod is unsupported in BGW backend v1".to_string(),
         )),
+        Instruction::LessThan { .. } | Instruction::Equal { .. } => Err(BackendError::BackendError(
+            "comparison gates require the Yao backend (garbled circuits); \
+             not supported in arithmetic BGW MPC"
+                .to_string(),
+        )),
     }
 }
 

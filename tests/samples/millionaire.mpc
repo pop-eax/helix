@@ -1,0 +1,14 @@
+// Yao's Millionaire Problem
+//
+// Two parties compare their wealth without revealing the actual amounts.
+// Returns 1 if alice is strictly richer than bob, 0 otherwise.
+//
+// Protocol: 2-party, Yao garbled circuit backend (yao / yao-2p).
+//   alice owns input[0], bob owns input[1].
+//
+// Example:
+//   runner millionaire.ir -i "300,200" -b yao   => output[0]: 1
+//   runner millionaire.ir -i "100,200" -b yao   => output[0]: 0
+fn millionaire(Secret Field<64> alice, Secret Field<64> bob) -> Bool {
+    return alice > bob;
+}

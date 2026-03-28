@@ -168,6 +168,13 @@ impl Backend for BgwBackend {
                 state.set_wire(*output, WireValue::Secret, *vis);
             }
             Instruction::Div { .. } | Instruction::Mod { .. } => {}
+            Instruction::LessThan { .. } | Instruction::Equal { .. } => {
+                return Err(BackendError::BackendError(
+                    "comparison gates require the Yao backend (garbled circuits); \
+                     not supported in arithmetic BGW MPC"
+                        .into(),
+                ));
+            }
         }
 
         Ok(())

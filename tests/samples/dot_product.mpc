@@ -1,0 +1,19 @@
+// Private Dot Product (4-element fixed-size)
+//
+// Computes the inner product of two private vectors:
+//   result = a0*b0 + a1*b1 + a2*b2 + a3*b3
+//
+// Typically used in 2-party setting: one party holds a0..a3, the other holds b0..b3.
+//
+// Protocol: works with both BGW (bgw / bgw-np) and Yao (yao / yao-2p) backends.
+//
+// Example (clear):
+//   runner dot_product.ir -i "1,2,3,4,1,2,3,4" -b clear  => output[0]: 30
+fn dot_product(
+    Secret Field<64> a0, Secret Field<64> a1,
+    Secret Field<64> a2, Secret Field<64> a3,
+    Secret Field<64> b0, Secret Field<64> b1,
+    Secret Field<64> b2, Secret Field<64> b3
+) -> Field<64> {
+    return a0*b0 + a1*b1 + a2*b2 + a3*b3;
+}

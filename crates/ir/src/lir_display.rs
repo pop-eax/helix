@@ -85,6 +85,8 @@ fn display_gate_type(gate_type: &GateType, inputs: &[WireId]) -> String {
         GateType::SubConstant { constant, field_size } => {
             format!("SUB_CONST({}, size={})", constant, field_size)
         }
+        GateType::LessThan => format!("LT({})", inputs_list),
+        GateType::Equal => format!("EQ({})", inputs_list),
     }
 }
 

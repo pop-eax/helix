@@ -186,6 +186,121 @@ impl YaoBackend {
         self.build_add_internal(in1, neg_in2, out);
     }
 
+    /// Unsigned N-bit less-than comparator (MSB-to-LSB ripple).
+    ///
+    /// Produces 1 in bit 0 of `out` iff `in1 < in2` (unsigned).
+    /// All other output bits are unused (not added as circuit outputs).
+    fn build_less_than(&mut self, in1: WireId, in2: WireId, out: WireId) {
+        self.init_wire(in1);
+        self.init_wire(in2);
+        self.init_wire(out);
+
+        let n = self.bit_width;
+
+        // Process bits from MSB (n-1) down to 0, propagating lt/eq state.
+        // lt_wire: "in1[MSB..i+1] < in2[MSB..i+1]"
+        // eq_wire: "in1[MSB..i+1] == in2[MSB..i+1]"
+        let mut lt_prev: Option<String> = None;
+        let mut eq_prev: Option<String> = None;
+
+        for step in 0..n {
+            let i = n - 1 - step; // MSB first
+            let a = self.wire_bit_name(in1, i);
+            let b = self.wire_bit_name(in2, i);
+
+            // not_a = NOT(a[i])
+            let not_a = format!("cmp_nota_{}_{}_{}", in1.0, in2.0, i);
+            self.circuit.add_gate(not_logic(), &[&a], &not_a);
+
+            // xor_ab = a[i] XOR b[i]   ("bits differ")
+            let xor_ab = format!("cmp_xor_{}_{}_{}", in1.0, in2.0, i);
+            self.circuit.add_gate(xor_logic(), &[&a, &b], &xor_ab);
+
+            // not_xor = NOT(xor_ab)   ("bits equal")
+            let not_xor = format!("cmp_nxor_{}_{}_{}", in1.0, in2.0, i);
+            self.circuit.add_gate(not_logic(), &[&xor_ab], &not_xor);
+
+            // less_here = not_a AND b[i]   ("a=0, b=1 at this bit")
+            let less_here = format!("cmp_lh_{}_{}_{}", in1.0, in2.0, i);
+            self.circuit.add_gate(and_logic(), &[&not_a, &b], &less_here);
+
+            let lt_cur = format!("cmp_lt_{}_{}_{}", in1.0, in2.0, i);
+            let eq_cur = format!("cmp_eq_{}_{}_{}", in1.0, in2.0, i);
+
+            match (&lt_prev, &eq_prev) {
+                (None, None) => {
+                    // MSB: initialise state directly from this bit.
+                    self.circuit.add_gate(and_logic(), &[&less_here, &less_here], &lt_cur); // copy
+                    self.circuit.add_gate(and_logic(), &[&not_xor, &not_xor], &eq_cur);   // copy
+                }
+                (Some(lp), Some(ep)) => {
+                    // lt_contrib = eq_prev AND less_here
+                    let lt_contrib = format!("cmp_lc_{}_{}_{}", in1.0, in2.0, i);
+                    self.circuit.add_gate(and_logic(), &[ep, &less_here], &lt_contrib);
+
+                    // lt_cur = lt_prev OR lt_contrib
+                    self.circuit.add_gate(or_logic(), &[lp, &lt_contrib], &lt_cur);
+
+                    // eq_cur = eq_prev AND not_xor
+                    self.circuit.add_gate(and_logic(), &[ep, &not_xor], &eq_cur);
+                }
+                _ => unreachable!(),
+            }
+
+            lt_prev = Some(lt_cur);
+            eq_prev = Some(eq_cur);
+        }
+
+        // Map final lt result to output bit 0.
+        let out0 = self.wire_bit_name(out, 0);
+        let final_lt = lt_prev.unwrap();
+        self.circuit.add_gate(and_logic(), &[&final_lt, &final_lt], &out0); // copy
+        self.circuit.add_output(&out0);
+    }
+
+    /// N-bit equality check: output bit 0 = 1 iff `in1 == in2`.
+    fn build_equal(&mut self, in1: WireId, in2: WireId, out: WireId) {
+        self.init_wire(in1);
+        self.init_wire(in2);
+        self.init_wire(out);
+
+        let n = self.bit_width;
+        let mut acc: Option<String> = None;
+
+        for i in 0..n {
+            let a = self.wire_bit_name(in1, i);
+            let b = self.wire_bit_name(in2, i);
+
+            // xor_i = a[i] XOR b[i]
+            let xor_i = format!("eq_xor_{}_{}_{}", in1.0, in2.0, i);
+            self.circuit.add_gate(xor_logic(), &[&a, &b], &xor_i);
+
+            // not_xor_i = NOT(xor_i)   ("bit i is equal")
+            let not_xor_i = format!("eq_nxor_{}_{}_{}", in1.0, in2.0, i);
+            self.circuit.add_gate(not_logic(), &[&xor_i], &not_xor_i);
+
+            acc = Some(match acc {
+                None => {
+                    // First bit: acc = not_xor_i (copy via AND with self)
+                    let first = format!("eq_acc_{}_{}_{}", in1.0, in2.0, i);
+                    self.circuit.add_gate(and_logic(), &[&not_xor_i, &not_xor_i], &first);
+                    first
+                }
+                Some(prev) => {
+                    let next = format!("eq_acc_{}_{}_{}", in1.0, in2.0, i);
+                    self.circuit.add_gate(and_logic(), &[&prev, &not_xor_i], &next);
+                    next
+                }
+            });
+        }
+
+        // Map to output bit 0.
+        let out0 = self.wire_bit_name(out, 0);
+        let final_acc = acc.unwrap();
+        self.circuit.add_gate(and_logic(), &[&final_acc, &final_acc], &out0);
+        self.circuit.add_output(&out0);
+    }
+
     // Same as build_add but assumes wires are already initialized (I should remove it later and add checks to the regular add function)
     fn build_add_internal(&mut self, in1: WireId, in2: WireId, out: WireId) {
         // Bit 0: half adder
@@ -570,6 +685,18 @@ impl Backend for YaoBackend {
                 }
 
                 state.set_wire(*output, WireValue::Secret, *visibility);
+                Ok(())
+            }
+
+            Instruction::LessThan { vis, input1, input2, output } => {
+                self.build_less_than(*input1, *input2, *output);
+                state.set_wire(*output, WireValue::Secret, vis.output_visibility());
+                Ok(())
+            }
+
+            Instruction::Equal { vis, input1, input2, output } => {
+                self.build_equal(*input1, *input2, *output);
+                state.set_wire(*output, WireValue::Secret, vis.output_visibility());
                 Ok(())
             }
 

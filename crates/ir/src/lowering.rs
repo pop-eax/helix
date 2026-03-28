@@ -174,43 +174,41 @@ impl Lowerer {
                 self.builder.add_gate(GateType::Not, vec![and_result])
             }
             HirInstructionKind::Equal { left, right } => {
-                // Equality: (a - b) == 0, implemented as comparison
-                // Simplified: for now, use subtraction and check for zero
                 let left_wire = self.get_wire_for_value(left)?;
                 let right_wire = self.get_wire_for_value(right)?;
-                let diff = self.builder.add_gate(GateType::Sub, vec![left_wire, right_wire]);
-                // Check if diff == 0 (would need zero comparison gate)
-                // For now, simplified
-                diff
+                self.builder.add_gate(GateType::Equal, vec![left_wire, right_wire])
             }
             HirInstructionKind::NotEqual { left, right } => {
+                // a != b  ≡  NOT(a == b)
                 let left_wire = self.get_wire_for_value(left)?;
                 let right_wire = self.get_wire_for_value(right)?;
-                let diff = self.builder.add_gate(GateType::Sub, vec![left_wire, right_wire]);
-                // Simplified
-                diff
+                let eq = self.builder.add_gate(GateType::Equal, vec![left_wire, right_wire]);
+                self.builder.add_gate(GateType::Not, vec![eq])
             }
             HirInstructionKind::LessThan { left, right } => {
-                // Comparison gates would be needed
-                // For now, simplified
                 let left_wire = self.get_wire_for_value(left)?;
                 let right_wire = self.get_wire_for_value(right)?;
-                self.builder.add_gate(GateType::Sub, vec![left_wire, right_wire])
+                self.builder.add_gate(GateType::LessThan, vec![left_wire, right_wire])
             }
             HirInstructionKind::LessThanOrEqual { left, right } => {
+                // a <= b  ≡  NOT(b < a)
                 let left_wire = self.get_wire_for_value(left)?;
                 let right_wire = self.get_wire_for_value(right)?;
-                self.builder.add_gate(GateType::Sub, vec![left_wire, right_wire])
+                let gt = self.builder.add_gate(GateType::LessThan, vec![right_wire, left_wire]);
+                self.builder.add_gate(GateType::Not, vec![gt])
             }
             HirInstructionKind::GreaterThan { left, right } => {
+                // a > b  ≡  b < a  (swap operands)
                 let left_wire = self.get_wire_for_value(left)?;
                 let right_wire = self.get_wire_for_value(right)?;
-                self.builder.add_gate(GateType::Sub, vec![right_wire, left_wire])
+                self.builder.add_gate(GateType::LessThan, vec![right_wire, left_wire])
             }
             HirInstructionKind::GreaterThanOrEqual { left, right } => {
+                // a >= b  ≡  NOT(a < b)
                 let left_wire = self.get_wire_for_value(left)?;
                 let right_wire = self.get_wire_for_value(right)?;
-                self.builder.add_gate(GateType::Sub, vec![right_wire, left_wire])
+                let lt = self.builder.add_gate(GateType::LessThan, vec![left_wire, right_wire]);
+                self.builder.add_gate(GateType::Not, vec![lt])
             }
             HirInstructionKind::Negate { value } => {
                 // Negate: multiply by -1 (or subtract from 0)

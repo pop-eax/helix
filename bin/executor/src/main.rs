@@ -76,9 +76,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let parties = cli.parties.ok_or("--parties required for bgw-np")?;
             let threshold = cli.threshold.ok_or("--threshold required for bgw-np")?;
             let addrs_str = cli.party_addrs.ok_or("--party-addrs required for bgw-np")?;
-            let my_value: u64 = cli.inputs.trim().parse()
-                .map_err(|_| format!("--inputs must be a single u64 for bgw-np, got {:?}", cli.inputs))?;
-            run_bgw_networked(&program, my_value, my_id, parties, threshold, &addrs_str).await?;
+            // Inputs are comma-separated: use '_' for inputs owned by other parties.
+            // Example: "-i 1,2,_,_" means this party owns the first two input wires.
+            let my_input_spec = cli.inputs.trim().to_string();
+            run_bgw_networked(&program, &my_input_spec, my_id, parties, threshold, &addrs_str).await?;
         }
 
         // ---- Networked 2-party Yao ----
@@ -168,7 +169,7 @@ fn print_outputs(outputs: &[(WireId, u64)]) {
 
 async fn run_bgw_networked(
     program: &Program,
-    my_value: u64,
+    input_spec: &str,
     my_id: usize,
     parties: usize,
     threshold: usize,
@@ -191,19 +192,57 @@ async fn run_bgw_networked(
     let backend = bgw::BgwNetBackend::new(my_id, parties, threshold)
         .map_err(|e| format!("bgw backend: {e}"))?;
 
-    // Every party owns one input wire (circuit input[my_id]).
-    // Build InputAssignment list: own wire has a value, others are None.
-    let inputs: Vec<runtime::InputAssignment> = program
+    // Parse comma-separated inputs where '_' means "I don't own this wire".
+    // E.g., "1,2,_,_" = this party owns input[0]=1, input[1]=2.
+    // Ownership: position i is owned by the party that provides a non-'_' value there.
+    // If multiple parties could own the same position, last non-'_' wins; in practice
+    // exactly one party should provide each position.
+    let spec_parts: Vec<&str> = input_spec.split(',').map(str::trim).collect();
+    let n_inputs = program.circuit.inputs.len();
+    if spec_parts.len() != n_inputs {
+        return Err(format!(
+            "input spec has {} entries but circuit has {n_inputs} inputs \
+             (use '_' for inputs you don't own, e.g. \"1,2,_,_\")",
+            spec_parts.len()
+        )
+        .into());
+    }
+
+    // Ownership assignment: owner(i) = floor(i * parties / n_inputs).
+    // This deterministically splits n_inputs evenly across parties.
+    // All parties derive the same owner for each position without communication.
+    let default_owner = |i: usize| -> usize { i * parties / n_inputs };
+
+    let mut inputs: Vec<runtime::InputAssignment> = program
         .circuit
         .inputs
         .iter()
         .enumerate()
         .map(|(i, inp)| runtime::InputAssignment {
             wire: inp.wire,
-            owner: i,
-            value: if i == my_id { Some(my_value) } else { None },
+            owner: default_owner(i),
+            value: None,
         })
         .collect();
+
+    for (i, part) in spec_parts.iter().enumerate() {
+        if *part != "_" {
+            let v: u64 = part.parse().map_err(|_| {
+                format!("invalid input at position {i}: expected u64 or '_', got {part:?}")
+            })?;
+            inputs[i].value = Some(v);
+            // Ownership is already set deterministically; just validate.
+            if inputs[i].owner != my_id {
+                return Err(format!(
+                    "position {i} is assigned to party {} by the ownership formula \
+                     (floor({i} * {parties} / {n_inputs})), not party {my_id}; \
+                     move this value to the correct party",
+                    inputs[i].owner
+                )
+                .into());
+            }
+        }
+    }
 
     let mut runner = runtime::Runner::new(network, backend, program.clone(), &inputs)?;
     let outputs = runner.run().await?;
