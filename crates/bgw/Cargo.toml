@@ -9,3 +9,7 @@ ark-ff = "0.5.0"
 ark-std = {version="0.5.0", features = ["getrandom"]}
 ir = { path = "../ir" }
 runtime = { path = "../runtime" }
+
+[dev-dependencies]
+net   = { path = "../net" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

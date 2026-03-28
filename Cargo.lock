@@ -256,7 +256,9 @@ dependencies = [
  "ark-ff",
  "ark-std",
  "ir",
+ "net",
  "runtime",
+ "tokio",
 ]
 
 [[package]]

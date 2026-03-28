@@ -531,3 +531,144 @@ pub fn parse_triple_blob(
         })
         .collect()
 }
+
+// ---- Tests ----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ir::lir::{CircuitBuilder, GateType, Metadata, Statistics, Visibility, WireId};
+    use net::stub_networks;
+    use runtime::{InputAssignment, Runner};
+
+    fn metadata(name: &str) -> Metadata {
+        Metadata {
+            version: "test".into(),
+            source_file: "test".into(),
+            function_name: name.into(),
+            field_modulus: None,
+            statistics: Statistics {
+                total_gates: 0,
+                gate_counts: Default::default(),
+                circuit_depth: 0,
+                num_inputs: 0,
+                num_outputs: 0,
+                num_wires: 0,
+            },
+        }
+    }
+
+    /// Circuit: output = a * b
+    fn mul_program() -> ir::lir::Program {
+        let mut b = CircuitBuilder::new();
+        let w0 = b.add_input(Visibility::Secret, Some("a".into()));
+        let w1 = b.add_input(Visibility::Secret, Some("b".into()));
+        let out = b.add_gate(GateType::Mul, vec![w0, w1]);
+        b.add_output(out);
+        b.build(metadata("mul"))
+    }
+
+    /// Circuit: output = (a + b) * c
+    fn add_mul_program() -> ir::lir::Program {
+        let mut b = CircuitBuilder::new();
+        let w0 = b.add_input(Visibility::Secret, Some("a".into()));
+        let w1 = b.add_input(Visibility::Secret, Some("b".into()));
+        let w2 = b.add_input(Visibility::Secret, Some("c".into()));
+        let sum = b.add_gate(GateType::Add, vec![w0, w1]);
+        let out = b.add_gate(GateType::Mul, vec![sum, w2]);
+        b.add_output(out);
+        b.build(metadata("add_mul"))
+    }
+
+    fn make_backend(
+        id: usize,
+        parties: usize,
+        threshold: usize,
+        blobs: &[Vec<u8>],
+    ) -> BgwNetBackend {
+        let shares = parse_triple_blob(&blobs[id]).unwrap();
+        BgwNetBackend::new(id, parties, threshold, shares).unwrap()
+    }
+
+    /// 3-party BGW: a * b = 6 * 7 = 42.
+    /// Party 0 owns `a`, party 1 owns `b`, party 2 is compute-only.
+    #[tokio::test]
+    async fn three_party_bgw_multiplication() {
+        let program = mul_program();
+        let (parties, threshold) = (3, 2);
+
+        let n_muls = count_multiplications(&program);
+        let blobs = dealer_generate_triple_blobs(n_muls, parties, threshold);
+
+        let mut stubs = stub_networks(parties);
+        let (net0, net1, net2) = (stubs.remove(0), stubs.remove(0), stubs.remove(0));
+        let (p0, p1, p2) = (program.clone(), program.clone(), program.clone());
+
+        let mk = |v0: Option<u64>, v1: Option<u64>| {
+            vec![
+                InputAssignment { wire: WireId(0), owner: 0, value: v0 },
+                InputAssignment { wire: WireId(1), owner: 1, value: v1 },
+            ]
+        };
+
+        let b0 = make_backend(0, parties, threshold, &blobs);
+        let b1 = make_backend(1, parties, threshold, &blobs);
+        let b2 = make_backend(2, parties, threshold, &blobs);
+
+        let t0 = tokio::spawn(async move {
+            Runner::new(net0, b0, p0, &mk(Some(6), None)).unwrap().run().await.unwrap()
+        });
+        let t1 = tokio::spawn(async move {
+            Runner::new(net1, b1, p1, &mk(None, Some(7))).unwrap().run().await.unwrap()
+        });
+        let t2 = tokio::spawn(async move {
+            Runner::new(net2, b2, p2, &mk(None, None)).unwrap().run().await.unwrap()
+        });
+
+        assert_eq!(t0.await.unwrap()[0].1, 42);
+        assert_eq!(t1.await.unwrap()[0].1, 42);
+        assert_eq!(t2.await.unwrap()[0].1, 42);
+    }
+
+    /// 3-party BGW: (a + b) * c = (3 + 4) * 5 = 35.
+    /// Party 0 owns `a` and `b`, party 1 owns `c`, party 2 is compute-only.
+    /// Add is local (no triple); Mul uses one Beaver triple.
+    #[tokio::test]
+    async fn three_party_bgw_add_then_mul() {
+        let program = add_mul_program();
+        let (parties, threshold) = (3, 2);
+
+        let n_muls = count_multiplications(&program);
+        let blobs = dealer_generate_triple_blobs(n_muls, parties, threshold);
+
+        let mut stubs = stub_networks(parties);
+        let (net0, net1, net2) = (stubs.remove(0), stubs.remove(0), stubs.remove(0));
+        let (p0, p1, p2) = (program.clone(), program.clone(), program.clone());
+
+        let mk = |v0: Option<u64>, v1: Option<u64>, v2: Option<u64>| {
+            vec![
+                InputAssignment { wire: WireId(0), owner: 0, value: v0 },
+                InputAssignment { wire: WireId(1), owner: 0, value: v1 },
+                InputAssignment { wire: WireId(2), owner: 1, value: v2 },
+            ]
+        };
+
+        let b0 = make_backend(0, parties, threshold, &blobs);
+        let b1 = make_backend(1, parties, threshold, &blobs);
+        let b2 = make_backend(2, parties, threshold, &blobs);
+
+        let t0 = tokio::spawn(async move {
+            Runner::new(net0, b0, p0, &mk(Some(3), Some(4), None)).unwrap().run().await.unwrap()
+        });
+        let t1 = tokio::spawn(async move {
+            Runner::new(net1, b1, p1, &mk(None, None, Some(5))).unwrap().run().await.unwrap()
+        });
+        let t2 = tokio::spawn(async move {
+            Runner::new(net2, b2, p2, &mk(None, None, None)).unwrap().run().await.unwrap()
+        });
+
+        assert_eq!(t0.await.unwrap()[0].1, 35);
+        assert_eq!(t1.await.unwrap()[0].1, 35);
+        assert_eq!(t2.await.unwrap()[0].1, 35);
+    }
+}
