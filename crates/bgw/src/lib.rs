@@ -8,7 +8,9 @@ pub mod shamir;
 pub mod types;
 
 pub use backend::{BgwBackend, BgwConfig};
-pub use net_backend::BgwNetBackend;
+pub use net_backend::{
+    count_multiplications, dealer_generate_triple_blobs, parse_triple_blob, BgwNetBackend,
+};
 pub use field::{field_to_u64_checked, u64_to_field, FieldConversionError};
 pub use ops::{
     add_shares, generate_beaver_triple, multiply_shares, multiply_shares_with_triple, scale_shares,

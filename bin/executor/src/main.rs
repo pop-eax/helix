@@ -186,10 +186,29 @@ async fn run_bgw_networked(
 
     let config = net::NetworkConfig::from_addrs(addrs.iter().copied(), my_id);
     eprintln!("[party {my_id}] connecting to network…");
-    let network = net::connect(config).await?;
+    let mut network = net::connect(config).await?;
     eprintln!("[party {my_id}] connected");
 
-    let backend = bgw::BgwNetBackend::new(my_id, parties, threshold)
+    // Offline phase — trusted dealer (party 0) generates all Beaver triples
+    // with OsRng, Shamir-shares each one, and sends each party only their slice.
+    // No party other than the dealer ever sees the full triple.
+    let n_muls = bgw::count_multiplications(&program);
+    let my_triple_blob: Vec<u8> = if my_id == 0 {
+        let blobs = bgw::dealer_generate_triple_blobs(n_muls, parties, threshold);
+        for (j, blob) in blobs.iter().enumerate() {
+            if j != my_id {
+                network.send(j, blob).await?;
+            }
+        }
+        blobs.into_iter().next().unwrap_or_default()
+    } else {
+        network.recv(0).await?
+    };
+    eprintln!("[party {my_id}] offline phase complete ({n_muls} triples)");
+
+    let triple_shares = bgw::parse_triple_blob(&my_triple_blob)
+        .map_err(|e| format!("triple blob: {e}"))?;
+    let backend = bgw::BgwNetBackend::new(my_id, parties, threshold, triple_shares)
         .map_err(|e| format!("bgw backend: {e}"))?;
 
     // Parse comma-separated inputs where '_' means "I don't own this wire".

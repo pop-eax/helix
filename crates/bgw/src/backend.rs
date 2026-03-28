@@ -10,8 +10,6 @@ use runtime::vm::{Backend, BackendError, Instruction, VMState, WireValue};
 use runtime::Visibility;
 use std::collections::HashMap;
 
-const DEFAULT_RNG_SEED: u64 = 0x_4247_575f_5345_4544;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BgwConfig {
     pub parties: usize,
@@ -26,7 +24,7 @@ pub struct BgwBackend {
     node_values: HashMap<BgwNodeId, PartyShares<Fr>>,
     output_cache: HashMap<WireId, u64>,
     executed: bool,
-    rng: ark_std::rand::rngs::StdRng,
+    rng: ark_std::rand::rngs::OsRng,
 }
 
 impl BgwBackend {
@@ -47,7 +45,6 @@ impl BgwBackend {
             ));
         }
 
-        use ark_std::rand::SeedableRng;
         Ok(Self {
             config,
             program: BgwProgram::default(),
@@ -55,7 +52,7 @@ impl BgwBackend {
             node_values: HashMap::new(),
             output_cache: HashMap::new(),
             executed: false,
-            rng: ark_std::rand::rngs::StdRng::seed_from_u64(DEFAULT_RNG_SEED),
+            rng: ark_std::rand::rngs::OsRng,
         })
     }
 

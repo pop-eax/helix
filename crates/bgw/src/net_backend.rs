@@ -3,9 +3,16 @@
 //! Each party holds only its own Shamir share for every wire.  Communication
 //! happens in two places:
 //!
-//! - **Multiplication**: one broadcast round using Beaver triples.  All parties
-//!   generate the same triples from a fixed RNG seed (trusted-dealer model).
-//!   Each party takes the slice `triple.x[my_id]` as its share.
+//! - **Multiplication**: one broadcast round using Beaver triples.
+//!   Triples are generated via the trusted-dealer model: party 0 samples a
+//!   random seed with `OsRng` and broadcasts it to all parties before protocol
+//!   execution begins (see [`dealer_seed`] + [`BgwNetBackend::new`]).  All
+//!   parties initialise the same `StdRng` from that seed and call
+//!   `generate_beaver_triple` in lockstep, each taking slice `[my_id]`.
+//!
+//!   Input sharing uses a separate per-party `OsRng` so that unequal input
+//!   counts across parties cannot desynchronise the shared triple-generation
+//!   sequence.
 //!
 //! - **Output reconstruction**: one broadcast round where every party sends its
 //!   output-wire shares; all parties then run Lagrange interpolation locally.
@@ -20,12 +27,8 @@ use runtime::Visibility;
 use std::collections::HashMap;
 
 use crate::field::{field_to_u64_checked, u64_to_field};
-use crate::ops::generate_beaver_triple;
 use crate::shamir::{reconstruct_secret, share_secret};
 use crate::types::Share;
-
-// Same seed as the simulated backend → same triple sequence.
-const RNG_SEED: u64 = 0x_4247_575f_5345_4544;
 
 // ---- Fr serialisation (32 bytes, 4 × little-endian u64 limbs) ----
 
@@ -88,16 +91,26 @@ pub struct BgwNetBackend {
     outgoing: Vec<(usize, Vec<u8>)>,
     /// Current pending network operation (at most one at a time).
     pending: Option<PendingOp>,
-    /// Deterministic RNG — same seed across all parties.
-    rng: ark_std::rand::rngs::StdRng,
+    /// Pre-distributed Beaver triple shares (offline phase).
+    /// Each entry is this party's share of one triple: ([a]_i, [b]_i, [c]_i).
+    /// Popped in order as Mul / Select gates are evaluated.
+    triple_queue: std::collections::VecDeque<(Share<Fr>, Share<Fr>, Share<Fr>)>,
+    /// Per-party OsRng for input sharing — independent across parties.
+    input_rng: ark_std::rand::rngs::OsRng,
     output_cache: HashMap<WireId, u64>,
 }
 
 impl BgwNetBackend {
+    /// Create a new networked BGW backend with pre-distributed triple shares.
+    ///
+    /// `triple_shares` is this party's portion of the offline-phase triples —
+    /// one `(a_i, b_i, c_i)` per multiplication gate.  Obtain it by calling
+    /// [`dealer_distribute_triples`] on party 0 before starting the runner.
     pub fn new(
         my_id: usize,
         n_parties: usize,
         threshold: usize,
+        triple_shares: Vec<(Share<Fr>, Share<Fr>, Share<Fr>)>,
     ) -> Result<Self, BackendError> {
         if n_parties == 0 {
             return Err(BackendError::BackendError("n_parties must be > 0".into()));
@@ -112,7 +125,6 @@ impl BgwNetBackend {
                 "my_id {my_id} out of range for {n_parties} parties"
             )));
         }
-        use ark_std::rand::SeedableRng;
         Ok(Self {
             my_id,
             n_parties,
@@ -120,8 +132,19 @@ impl BgwNetBackend {
             my_shares: HashMap::new(),
             outgoing: Vec::new(),
             pending: None,
-            rng: ark_std::rand::rngs::StdRng::seed_from_u64(RNG_SEED),
+            triple_queue: triple_shares.into(),
+            input_rng: ark_std::rand::rngs::OsRng,
             output_cache: HashMap::new(),
+        })
+    }
+
+    fn pop_triple(&mut self) -> Result<(Share<Fr>, Share<Fr>, Share<Fr>), BackendError> {
+        self.triple_queue.pop_front().ok_or_else(|| {
+            BackendError::BackendError(
+                "Beaver triple queue exhausted — circuit has more multiplications \
+                 than triples distributed in the offline phase"
+                    .into(),
+            )
         })
     }
 
@@ -161,7 +184,7 @@ impl Backend for BgwNetBackend {
             u64_to_field::<Fr>(value),
             self.threshold,
             n_parties,
-            &mut self.rng,
+            &mut self.input_rng,
         )
         .map_err(|e| BackendError::BackendError(format!("share_input: {e:?}")))?;
         Ok(all.into_inner().into_iter().map(|s| fr_to_bytes(s.0)).collect())
@@ -194,7 +217,7 @@ impl Backend for BgwNetBackend {
             u64_to_field::<Fr>(value),
             self.threshold,
             self.n_parties,
-            &mut self.rng,
+            &mut self.input_rng,
         )
         .map_err(|e| BackendError::BackendError(format!("set_input: {e:?}")))?;
         self.my_shares
@@ -254,15 +277,7 @@ impl Backend for BgwNetBackend {
                 let x_i = self.my_share(*input1)?;
                 let y_i = self.my_share(*input2)?;
 
-                // All parties generate the same triple (same seed → same sequence).
-                // Each party takes slice [my_id] as their share.
-                let triple =
-                    generate_beaver_triple::<Fr, _>(self.threshold, self.n_parties, &mut self.rng)
-                        .map_err(|e| BackendError::BackendError(format!("beaver: {e:?}")))?;
-
-                let a_i = triple.a.as_slice()[self.my_id];
-                let b_i = triple.b.as_slice()[self.my_id];
-                let c_i = triple.c.as_slice()[self.my_id];
+                let (a_i, b_i, c_i) = self.pop_triple()?;
 
                 let d_i = x_i.0 - a_i.0; // my share of δ = x − a
                 let e_i = y_i.0 - b_i.0; // my share of ε = y − b
@@ -293,13 +308,7 @@ impl Backend for BgwNetBackend {
                 // diff_i = then_val_i - else_val_i  (local)
                 let diff_i = Share(tv_i.0 - ev_i.0);
 
-                let triple =
-                    generate_beaver_triple::<Fr, _>(self.threshold, self.n_parties, &mut self.rng)
-                        .map_err(|e| BackendError::BackendError(format!("beaver select: {e:?}")))?;
-
-                let a_i = triple.a.as_slice()[self.my_id];
-                let b_i = triple.b.as_slice()[self.my_id];
-                let c_i = triple.c.as_slice()[self.my_id];
+                let (a_i, b_i, c_i) = self.pop_triple()?;
 
                 let d_i = cond_i.0 - a_i.0;
                 let e_i = diff_i.0 - b_i.0;
@@ -460,4 +469,65 @@ impl Backend for BgwNetBackend {
             .copied()
             .ok_or(BackendError::WireNotSet(wire))
     }
+}
+
+// ---- Trusted-dealer offline phase ----
+
+/// Count the number of Beaver triples the circuit needs (one per Mul / Select gate).
+pub fn count_multiplications(program: &ir::lir::Program) -> usize {
+    use ir::lir::GateType;
+    program
+        .circuit
+        .gates
+        .iter()
+        .filter(|g| matches!(g.gate_type, GateType::Mul | GateType::Select))
+        .count()
+}
+
+/// Dealer (party 0): generate `n_triples` Beaver triples with `OsRng` and
+/// return one serialised blob per party.  Blob `i` contains
+/// `([a]_i ‖ [b]_i ‖ [c]_i)` for each triple — 96 bytes per triple.
+/// Send `blobs[i]` to party `i` (keep `blobs[my_id]` locally).
+pub fn dealer_generate_triple_blobs(
+    n_triples: usize,
+    n_parties: usize,
+    threshold: usize,
+) -> Vec<Vec<u8>> {
+    use crate::ops::generate_beaver_triple;
+    use ark_std::rand::rngs::OsRng;
+
+    let mut blobs: Vec<Vec<u8>> = vec![Vec::with_capacity(n_triples * 96); n_parties];
+    let mut rng = OsRng;
+
+    for _ in 0..n_triples {
+        let triple = generate_beaver_triple::<Fr, _>(threshold, n_parties, &mut rng)
+            .expect("triple generation");
+        for i in 0..n_parties {
+            blobs[i].extend(fr_to_bytes(triple.a.as_slice()[i].0));
+            blobs[i].extend(fr_to_bytes(triple.b.as_slice()[i].0));
+            blobs[i].extend(fr_to_bytes(triple.c.as_slice()[i].0));
+        }
+    }
+    blobs
+}
+
+/// Parse a blob received from the dealer into a vector of triple shares.
+/// Each 96-byte chunk is one `([a]_i, [b]_i, [c]_i)`.
+pub fn parse_triple_blob(
+    blob: &[u8],
+) -> Result<Vec<(Share<Fr>, Share<Fr>, Share<Fr>)>, BackendError> {
+    if blob.len() % 96 != 0 {
+        return Err(BackendError::BackendError(format!(
+            "triple blob length {} is not a multiple of 96",
+            blob.len()
+        )));
+    }
+    blob.chunks_exact(96)
+        .map(|chunk| {
+            let a = Share(fr_from_bytes(&chunk[..32])?);
+            let b = Share(fr_from_bytes(&chunk[32..64])?);
+            let c = Share(fr_from_bytes(&chunk[64..96])?);
+            Ok((a, b, c))
+        })
+        .collect()
 }
