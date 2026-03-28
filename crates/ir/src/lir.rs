@@ -198,7 +198,7 @@ impl CircuitBuilder {
     }
     
     pub fn build(mut self, mut metadata: Metadata) -> Program {
-        let statistics = compute_statistics(&self.gates, self.inputs.len(), self.outputs.len(), self.next_wire);
+        let statistics = compute_statistics(&self.gates, &self.inputs, &self.outputs, self.next_wire);
         metadata.statistics = statistics;
         
         Program {
@@ -214,61 +214,51 @@ impl CircuitBuilder {
 
 fn compute_statistics(
     gates: &[Gate],
-    num_inputs: usize,
-    num_outputs: usize,
+    inputs: &[Input],
+    outputs: &[WireId],
     num_wires: usize,
 ) -> Statistics {
     let mut gate_counts = HashMap::new();
     for gate in gates {
         *gate_counts.entry(gate.gate_type).or_insert(0) += 1;
     }
-    
-    // Compute depth (requires topological analysis)
-    let circuit_depth = compute_circuit_depth(gates);
-    
+
+    let circuit_depth = compute_circuit_depth(gates, inputs, outputs);
+
     Statistics {
         total_gates: gates.len(),
         gate_counts,
         circuit_depth,
-        num_inputs,
-        num_outputs,
+        num_inputs: inputs.len(),
+        num_outputs: outputs.len(),
         num_wires,
     }
 }
 
-fn compute_circuit_depth(gates: &[Gate]) -> usize {
-    // Build dependency graph and compute longest path
-    // Inputs have depth 0, gates have depth = max(input_depths) + 1
-    
-    // First, collect all input wires (wires that are never outputs of gates)
-    let mut all_wires: std::collections::HashSet<WireId> = gates.iter()
-        .flat_map(|g| g.inputs.iter().copied())
-        .collect();
-    let output_wires: std::collections::HashSet<WireId> = gates.iter()
-        .map(|g| g.output)
-        .collect();
-    
-    // Input wires are those that appear as inputs but never as outputs
-    let input_wires: std::collections::HashSet<WireId> = all_wires
-        .difference(&output_wires)
-        .copied()
-        .collect();
-    
-    let mut depths = HashMap::new();
-    
-    // Initialize input wires to depth 0
-    for wire in &input_wires {
-        depths.insert(*wire, 0);
+fn compute_circuit_depth(gates: &[Gate], inputs: &[Input], outputs: &[WireId]) -> usize {
+    let mut depths: HashMap<WireId, usize> = HashMap::new();
+
+    // Seed actual circuit input wires at depth 0.
+    for input in inputs {
+        depths.insert(input.wire, 0);
     }
-    
-    // Process gates (assuming topological order, but handle cycles gracefully)
+
+    // Gates are emitted in topological (SSA) order by the builder, so a single
+    // forward pass suffices.  Constant gates have no inputs and get depth 0.
     for gate in gates {
-        let max_input_depth = gate.inputs.iter()
+        let d = gate.inputs.iter()
             .filter_map(|w| depths.get(w))
             .max()
-            .unwrap_or(&0);
-        depths.insert(gate.output, max_input_depth + 1);
+            .copied()
+            .map(|d| d + 1)
+            .unwrap_or(0);
+        depths.insert(gate.output, d);
     }
-    
-    depths.values().max().copied().unwrap_or(0)
+
+    // Depth = longest path ending at any output wire.
+    outputs.iter()
+        .filter_map(|w| depths.get(w))
+        .max()
+        .copied()
+        .unwrap_or(0)
 }
