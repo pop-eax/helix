@@ -1,0 +1,18 @@
+[package]
+name = "shamir-verify"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+creusot-std = "0.11.0-dev"
+ark-ff = "0.4"
+ark-bls12-381 = "0.4"
+ark-std = "0.4"
+
+[patch.crates-io]
+creusot-std = { path = "/home/khaled/.cargo/git/checkouts/creusot-1ab658fd39688aa3/1faf8fd/creusot-std" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(creusot)'] }
+
+[workspace]

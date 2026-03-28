@@ -1,1 +1,4 @@
 /target
+/verify/shamir-verify/target
+/verify/shamir-verify/.why3find
+/verify/shamir-verify/verif
