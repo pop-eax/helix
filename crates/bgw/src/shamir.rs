@@ -50,6 +50,25 @@ pub fn generate_shares_from_poly<F: PrimeField>(
     Ok(PartyShares::new(shares))
 }
 
+/// Like [`share_secret`] but also returns the polynomial coefficients so the
+/// caller can build Feldman VSS commitments (`Aⱼ = coeffs[j] · G`).
+pub fn sample_and_share<F: PrimeField, R: Rng + ?Sized>(
+    secret: F,
+    threshold: usize,
+    parties: usize,
+    rng: &mut R,
+) -> Result<(PartyShares<F>, Vec<F>), ShamirError> {
+    if threshold == 0 {
+        return Err(ShamirError::InvalidThreshold);
+    }
+    if parties < threshold {
+        return Err(ShamirError::InvalidPartyCount);
+    }
+    let coeffs = sample_polynomial(secret, threshold - 1, rng);
+    let shares = generate_shares_from_poly(&coeffs, parties)?;
+    Ok((shares, coeffs))
+}
+
 pub fn share_secret<F: PrimeField, R: Rng + ?Sized>(
     secret: F,
     threshold: usize,

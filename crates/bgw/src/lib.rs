@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod commit;
 pub mod field;
 pub mod ir;
 pub mod lowering;

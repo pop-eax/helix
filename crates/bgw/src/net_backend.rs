@@ -19,15 +19,16 @@
 //!
 //! Add/Sub/constants are purely local — share arithmetic is linear.
 
-use ark_bls12_381::Fr;
+use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::PrimeField;
 use ir::lir::WireId;
 use runtime::vm::{Backend, BackendError, Instruction, VMState, WireValue};
 use runtime::Visibility;
 use std::collections::HashMap;
 
+use crate::commit;
 use crate::field::{field_to_u64_checked, u64_to_field};
-use crate::shamir::{reconstruct_secret, share_secret};
+use crate::shamir::{reconstruct_secret, sample_and_share};
 use crate::types::Share;
 
 // ---- Fr serialisation (32 bytes, 4 × little-endian u64 limbs) ----
@@ -98,6 +99,11 @@ pub struct BgwNetBackend {
     /// Per-party OsRng for input sharing — independent across parties.
     input_rng: ark_std::rand::rngs::OsRng,
     output_cache: HashMap<WireId, u64>,
+    /// Feldman VSS commitment shadow: `Some(C)` = wire has a live commitment,
+    /// `None` = commitment was broken by a Mul/Select gate.
+    wire_commit: HashMap<WireId, Option<G1Projective>>,
+    /// 1-based party index for Shamir evaluation (= my_id + 1).
+    party_index: usize,
 }
 
 impl BgwNetBackend {
@@ -135,6 +141,8 @@ impl BgwNetBackend {
             triple_queue: triple_shares.into(),
             input_rng: ark_std::rand::rngs::OsRng,
             output_cache: HashMap::new(),
+            wire_commit: HashMap::new(),
+            party_index: my_id + 1,
         })
     }
 
@@ -165,6 +173,24 @@ impl BgwNetBackend {
     }
 }
 
+// ---- Commitment propagation helpers ----
+
+/// `C(a+b) = C(a) + C(b)` — returns `None` if either input has no commitment.
+fn opt_add_commits(a: Option<G1Projective>, b: Option<G1Projective>) -> Option<G1Projective> {
+    match (a, b) {
+        (Some(ca), Some(cb)) => Some(commit::add_commits(ca, cb)),
+        _ => None,
+    }
+}
+
+/// `C(a-b) = C(a) - C(b)` — returns `None` if either input has no commitment.
+fn opt_sub_commits(a: Option<G1Projective>, b: Option<G1Projective>) -> Option<G1Projective> {
+    match (a, b) {
+        (Some(ca), Some(cb)) => Some(commit::sub_commits(ca, cb)),
+        _ => None,
+    }
+}
+
 impl Backend for BgwNetBackend {
     fn name(&self) -> &'static str {
         "BGW Arithmetic (networked)"
@@ -173,24 +199,35 @@ impl Backend for BgwNetBackend {
     // ---- Input distribution ----
 
     /// Called by the party that OWNS this wire.
-    /// Returns one serialised share per party (sent to party j by the runner).
+    /// Returns one serialised blob per party: `[32 bytes: Fr share] ++ [(t+1)*48 bytes: Feldman commit vec]`.
     fn share_input(
         &mut self,
         _wire: WireId,
         value: u64,
         n_parties: usize,
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        let all = share_secret(
+        let (all, coeffs) = sample_and_share(
             u64_to_field::<Fr>(value),
             self.threshold,
             n_parties,
             &mut self.input_rng,
         )
         .map_err(|e| BackendError::BackendError(format!("share_input: {e:?}")))?;
-        Ok(all.into_inner().into_iter().map(|s| fr_to_bytes(s.0)).collect())
+        let commit_vec = commit::feldman_commitments(&coeffs);
+        let commit_bytes = commit::serialize_commit_vec(&commit_vec);
+        Ok(all
+            .into_inner()
+            .into_iter()
+            .map(|s| {
+                let mut blob = fr_to_bytes(s.0);
+                blob.extend_from_slice(&commit_bytes);
+                blob
+            })
+            .collect())
     }
 
-    /// Called with the share pushed to us by the wire's owner.
+    /// Called with the blob pushed to us by the wire's owner.
+    /// Blob format: `[32 bytes: Fr share] ++ [(t+1)*48 bytes: Feldman commit vec]`.
     fn receive_input_share(
         &mut self,
         wire: WireId,
@@ -198,8 +235,28 @@ impl Backend for BgwNetBackend {
         share: Vec<u8>,
         state: &mut VMState,
     ) -> Result<(), BackendError> {
-        let s = fr_from_bytes(&share)?;
+        if share.len() < 32 {
+            return Err(BackendError::BackendError(format!(
+                "share blob too short: {} bytes",
+                share.len()
+            )));
+        }
+        let s = fr_from_bytes(&share[..32])?;
+        let commit_opt = if share.len() > 32 {
+            let commit_vec = commit::deserialize_commit_vec(&share[32..])
+                .map_err(|e| BackendError::BackendError(e))?;
+            if !commit::verify_share(s, self.party_index, &commit_vec) {
+                return Err(BackendError::BackendError(
+                    "Feldman VSS share verification failed — input may have been tampered with"
+                        .into(),
+                ));
+            }
+            Some(commit_vec[0])
+        } else {
+            None
+        };
         self.my_shares.insert(wire, Share(s));
+        self.wire_commit.insert(wire, commit_opt);
         state.set_wire(wire, WireValue::Secret, Visibility::Secret);
         Ok(())
     }
@@ -213,15 +270,16 @@ impl Backend for BgwNetBackend {
         visibility: Visibility,
         state: &mut VMState,
     ) -> Result<(), BackendError> {
-        let all = share_secret(
+        let (all, coeffs) = sample_and_share(
             u64_to_field::<Fr>(value),
             self.threshold,
             self.n_parties,
             &mut self.input_rng,
         )
         .map_err(|e| BackendError::BackendError(format!("set_input: {e:?}")))?;
-        self.my_shares
-            .insert(wire, all.as_slice()[self.my_id]);
+        let commit_vec = commit::feldman_commitments(&coeffs);
+        self.wire_commit.insert(wire, Some(commit_vec[0]));
+        self.my_shares.insert(wire, all.as_slice()[self.my_id]);
         state.set_wire(wire, WireValue::Secret, visibility);
         Ok(())
     }
@@ -238,41 +296,76 @@ impl Backend for BgwNetBackend {
             Instruction::Add { vis, input1, input2, output, .. } => {
                 let z = Share(self.my_share(*input1)?.0 + self.my_share(*input2)?.0);
                 self.my_shares.insert(*output, z);
+                let c = opt_add_commits(
+                    self.wire_commit.get(input1).and_then(|x| x.as_ref()).cloned(),
+                    self.wire_commit.get(input2).and_then(|x| x.as_ref()).cloned(),
+                );
+                self.wire_commit.insert(*output, c);
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
             Instruction::Sub { vis, input1, input2, output, .. } => {
                 let z = Share(self.my_share(*input1)?.0 - self.my_share(*input2)?.0);
                 self.my_shares.insert(*output, z);
+                let c = opt_sub_commits(
+                    self.wire_commit.get(input1).and_then(|x| x.as_ref()).cloned(),
+                    self.wire_commit.get(input2).and_then(|x| x.as_ref()).cloned(),
+                );
+                self.wire_commit.insert(*output, c);
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
             // Public constants: every party holds the constant itself.
             // Reconstruction: Σ λ_i · c = c · Σ λ_i = c · 1 = c  ✓
             Instruction::Constant { value, output, visibility, .. } => {
-                self.my_shares
-                    .insert(*output, Share(u64_to_field::<Fr>(*value)));
+                self.my_shares.insert(*output, Share(u64_to_field::<Fr>(*value)));
+                self.wire_commit.insert(
+                    *output,
+                    Some(commit::constant_commit(u64_to_field::<Fr>(*value))),
+                );
                 state.set_wire(*output, WireValue::Secret, *visibility);
             }
             // Constant-operand gates: every party applies the same linear op.
             Instruction::AddConstant { vis, input, constant, output, .. } => {
-                let c = u64_to_field::<Fr>(*constant);
-                let z = Share(self.my_share(*input)?.0 + c);
+                let c_fr = u64_to_field::<Fr>(*constant);
+                let z = Share(self.my_share(*input)?.0 + c_fr);
                 self.my_shares.insert(*output, z);
+                let wc = self
+                    .wire_commit
+                    .get(input)
+                    .and_then(|x| x.as_ref())
+                    .cloned()
+                    .map(|c| commit::add_commits(c, commit::constant_commit(c_fr)));
+                self.wire_commit.insert(*output, wc);
                 state.set_wire(*output, WireValue::Secret, *vis);
             }
             Instruction::SubConstant { vis, input, constant, output, .. } => {
-                let c = u64_to_field::<Fr>(*constant);
-                let z = Share(self.my_share(*input)?.0 - c);
+                let c_fr = u64_to_field::<Fr>(*constant);
+                let z = Share(self.my_share(*input)?.0 - c_fr);
                 self.my_shares.insert(*output, z);
+                let wc = self
+                    .wire_commit
+                    .get(input)
+                    .and_then(|x| x.as_ref())
+                    .cloned()
+                    .map(|c| commit::sub_commits(c, commit::constant_commit(c_fr)));
+                self.wire_commit.insert(*output, wc);
                 state.set_wire(*output, WireValue::Secret, *vis);
             }
             Instruction::MulConstant { vis, input, constant, output, .. } => {
-                let c = u64_to_field::<Fr>(*constant);
-                let z = Share(self.my_share(*input)?.0 * c);
+                let c_fr = u64_to_field::<Fr>(*constant);
+                let z = Share(self.my_share(*input)?.0 * c_fr);
                 self.my_shares.insert(*output, z);
+                let wc = self
+                    .wire_commit
+                    .get(input)
+                    .and_then(|x| x.as_ref())
+                    .cloned()
+                    .map(|c| commit::scale_commit(c, c_fr));
+                self.wire_commit.insert(*output, wc);
                 state.set_wire(*output, WireValue::Secret, *vis);
             }
 
             // Multiplication — needs one broadcast round (Beaver triples).
+            // Breaks the commitment chain: output commitment is marked None.
             Instruction::Mul { vis, input1, input2, output, .. } => {
                 let x_i = self.my_share(*input1)?;
                 let y_i = self.my_share(*input2)?;
@@ -295,11 +388,13 @@ impl Backend for BgwNetBackend {
                     d_i,
                     e_i,
                 });
+                self.wire_commit.insert(*output, None); // Mul breaks linearity
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
 
             // Select: output = else_val + condition * (then_val - else_val)
             // The subtraction is local; the multiply needs one Beaver round.
+            // Breaks the commitment chain: output commitment is marked None.
             Instruction::Select { output_vis, condition, then_val, else_val, output } => {
                 let cond_i = self.my_share(*condition)?;
                 let tv_i = self.my_share(*then_val)?;
@@ -326,6 +421,7 @@ impl Backend for BgwNetBackend {
                     d_i,
                     e_i,
                 });
+                self.wire_commit.insert(*output, None); // Select breaks linearity
                 state.set_wire(*output, WireValue::Secret, *output_vis);
             }
 
@@ -464,10 +560,26 @@ impl Backend for BgwNetBackend {
     }
 
     fn get_output(&mut self, wire: WireId, _state: &VMState) -> Result<u64, BackendError> {
-        self.output_cache
+        let v = self
+            .output_cache
             .get(&wire)
             .copied()
-            .ok_or(BackendError::WireNotSet(wire))
+            .ok_or(BackendError::WireNotSet(wire))?;
+
+        // Homomorphic output check: if the commitment chain survived (no Mul gate
+        // between input and output), verify v·G == stored commitment.
+        if let Some(&Some(expected)) = self.wire_commit.get(&wire) {
+            let actual = commit::constant_commit(u64_to_field::<Fr>(v));
+            if actual != expected {
+                return Err(BackendError::BackendError(format!(
+                    "output commitment mismatch on wire {:?}: \
+                     homomorphic verification failed (wire may have been tampered with)",
+                    wire
+                )));
+            }
+        }
+
+        Ok(v)
     }
 }
 
@@ -670,5 +782,81 @@ mod tests {
         assert_eq!(t0.await.unwrap()[0].1, 35);
         assert_eq!(t1.await.unwrap()[0].1, 35);
         assert_eq!(t2.await.unwrap()[0].1, 35);
+    }
+
+    /// 3-party BGW: pure-add circuit `a + b` — no Mul, so the commitment chain
+    /// stays intact and the homomorphic output check fires silently.
+    #[tokio::test]
+    async fn three_party_bgw_add_homomorphic_check() {
+        let mut builder = CircuitBuilder::new();
+        let w0 = builder.add_input(Visibility::Secret, Some("a".into()));
+        let w1 = builder.add_input(Visibility::Secret, Some("b".into()));
+        let out = builder.add_gate(GateType::Add, vec![w0, w1]);
+        builder.add_output(out);
+        let program = builder.build(metadata("add_only"));
+
+        let (parties, threshold) = (3, 2);
+        let blobs = dealer_generate_triple_blobs(0, parties, threshold); // no triples needed
+
+        let mut stubs = stub_networks(parties);
+        let (net0, net1, net2) = (stubs.remove(0), stubs.remove(0), stubs.remove(0));
+        let (p0, p1, p2) = (program.clone(), program.clone(), program.clone());
+
+        let mk = |v0: Option<u64>, v1: Option<u64>| {
+            vec![
+                InputAssignment { wire: WireId(0), owner: 0, value: v0 },
+                InputAssignment { wire: WireId(1), owner: 1, value: v1 },
+            ]
+        };
+
+        let b0 = make_backend(0, parties, threshold, &blobs);
+        let b1 = make_backend(1, parties, threshold, &blobs);
+        let b2 = make_backend(2, parties, threshold, &blobs);
+
+        let t0 = tokio::spawn(async move {
+            Runner::new(net0, b0, p0, &mk(Some(11), None)).unwrap().run().await.unwrap()
+        });
+        let t1 = tokio::spawn(async move {
+            Runner::new(net1, b1, p1, &mk(None, Some(22))).unwrap().run().await.unwrap()
+        });
+        let t2 = tokio::spawn(async move {
+            Runner::new(net2, b2, p2, &mk(None, None)).unwrap().run().await.unwrap()
+        });
+
+        // 11 + 22 = 33 — commitment check passed (no error) means homomorphic
+        // verification succeeded end-to-end.
+        assert_eq!(t0.await.unwrap()[0].1, 33);
+        assert_eq!(t1.await.unwrap()[0].1, 33);
+        assert_eq!(t2.await.unwrap()[0].1, 33);
+    }
+
+    /// Tamper test: corrupt a share blob so the Fr value doesn't satisfy the
+    /// Feldman commitment — `receive_input_share` must return an error.
+    #[test]
+    fn feldman_tamper_detected() {
+        // Build a valid blob for party 0 (party_index = 1).
+        let (parties, threshold) = (3, 2);
+        let blobs = dealer_generate_triple_blobs(0, parties, threshold);
+        let mut backend = make_backend(0, parties, threshold, &blobs);
+
+        // Construct a valid blob via share_input so we know the format.
+        let valid_blobs = backend.share_input(WireId(0), 42, parties).unwrap();
+        let mut tampered = valid_blobs[0].clone();
+        // Flip one byte of the Fr share portion to corrupt it.
+        tampered[0] ^= 0xFF;
+
+        let mut state = runtime::vm::VMState::new(1, u64::MAX);
+        let result = backend.receive_input_share(
+            WireId(0),
+            Visibility::Secret,
+            tampered,
+            &mut state,
+        );
+        assert!(
+            result.is_err(),
+            "tampered share should be rejected by Feldman verification"
+        );
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("Feldman"), "expected Feldman error, got: {err_msg}");
     }
 }

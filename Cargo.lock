@@ -253,7 +253,9 @@ name = "bgw"
 version = "0.1.0"
 dependencies = [
  "ark-bls12-381",
+ "ark-ec",
  "ark-ff",
+ "ark-serialize",
  "ark-std",
  "ir",
  "net",
