@@ -86,9 +86,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "yao-2p" => {
             let my_id = cli.my_id.ok_or("--my-id required for yao-2p")?;
             let addrs_str = cli.party_addrs.ok_or("--party-addrs required for yao-2p")?;
-            let my_value: u64 = cli.inputs.trim().parse()
-                .map_err(|_| format!("--inputs must be a single u64 for yao-2p, got {:?}", cli.inputs))?;
-            run_yao_two_party(&program, my_value, cli.bits, my_id, &addrs_str).await?;
+            let my_input_spec = cli.inputs.trim().to_string();
+            run_yao_two_party(&program, &my_input_spec, cli.bits, my_id, &addrs_str).await?;
         }
 
         other => return Err(format!("Unknown backend '{other}'. Use: clear, yao, bgw, yao-2p, bgw-np").into()),
@@ -165,6 +164,84 @@ fn print_outputs(outputs: &[(WireId, u64)]) {
     }
 }
 
+// ---- Shared input-spec parser ----
+
+/// Parse a comma-separated input spec like `"1,2,_,_"` into `InputAssignment`s.
+///
+/// `_` means "I don't own this wire".  Ownership falls back to
+/// `floor(i * n_parties / n_inputs)` when no circuit party annotation is present.
+/// Returns an error if a wire owned by another party has a value, or a wire owned
+/// by this party is marked `_`.
+fn parse_input_spec(
+    program: &Program,
+    spec: &str,
+    my_id: usize,
+    n_parties: usize,
+) -> Result<Vec<runtime::InputAssignment>, Box<dyn std::error::Error>> {
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    let n_inputs = program.circuit.inputs.len();
+    if parts.len() != n_inputs {
+        return Err(format!(
+            "input spec has {} entries but circuit has {n_inputs} inputs \
+             (use '_' for inputs you don't own)",
+            parts.len()
+        )
+        .into());
+    }
+
+    let owner_of = |i: usize, inp: &ir::lir::Input| -> usize {
+        inp.party
+            .map(|p| p.0)
+            .unwrap_or_else(|| i * n_parties / n_inputs)
+    };
+
+    let mut assignments: Vec<runtime::InputAssignment> = program
+        .circuit
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, inp)| runtime::InputAssignment {
+            wire: inp.wire,
+            owner: owner_of(i, inp),
+            value: None,
+        })
+        .collect();
+
+    for (i, part) in parts.iter().enumerate() {
+        if *part != "_" {
+            let v: u64 = part.parse().map_err(|_| {
+                format!("invalid input at position {i}: expected u64 or '_', got {part:?}")
+            })?;
+            assignments[i].value = Some(v);
+            if assignments[i].owner != my_id {
+                let source = if program.circuit.inputs[i].party.is_some() {
+                    "circuit party annotation"
+                } else {
+                    "ownership formula floor(i * n_parties / n_inputs)"
+                };
+                return Err(format!(
+                    "input {i} is owned by party {} (from {source}), not party {my_id}; \
+                     remove this value or move it to the correct party",
+                    assignments[i].owner
+                )
+                .into());
+            }
+        }
+    }
+
+    for (i, a) in assignments.iter().enumerate() {
+        if a.owner == my_id && a.value.is_none() {
+            return Err(format!(
+                "input {i} is owned by this party ({my_id}), but was marked '_'; \
+                 you must provide a value for every input you own"
+            )
+            .into());
+        }
+    }
+
+    Ok(assignments)
+}
+
 // ---- n-party BGW (networked) ----
 
 async fn run_bgw_networked(
@@ -211,73 +288,7 @@ async fn run_bgw_networked(
     let backend = bgw::BgwNetBackend::new(my_id, parties, threshold, triple_shares)
         .map_err(|e| format!("bgw backend: {e}"))?;
 
-    // Parse comma-separated inputs where '_' means "I don't own this wire".
-    // E.g., "1,2,_,_" = this party owns input[0]=1, input[1]=2.
-    // Ownership: position i is owned by the party that provides a non-'_' value there.
-    // If multiple parties could own the same position, last non-'_' wins; in practice
-    // exactly one party should provide each position.
-    let spec_parts: Vec<&str> = input_spec.split(',').map(str::trim).collect();
-    let n_inputs = program.circuit.inputs.len();
-    if spec_parts.len() != n_inputs {
-        return Err(format!(
-            "input spec has {} entries but circuit has {n_inputs} inputs \
-             (use '_' for inputs you don't own, e.g. \"1,2,_,_\")",
-            spec_parts.len()
-        )
-        .into());
-    }
-
-    // Ownership: use the party annotation stored in the circuit when present;
-    // fall back to the deterministic formula floor(i * parties / n_inputs) otherwise.
-    // All parties compute the same owner for each position without communication.
-    let owner_of = |i: usize, inp: &ir::lir::Input| -> usize {
-        inp.party.map(|p| p.0).unwrap_or_else(|| i * parties / n_inputs)
-    };
-
-    let mut inputs: Vec<runtime::InputAssignment> = program
-        .circuit
-        .inputs
-        .iter()
-        .enumerate()
-        .map(|(i, inp)| runtime::InputAssignment {
-            wire: inp.wire,
-            owner: owner_of(i, inp),
-            value: None,
-        })
-        .collect();
-
-    for (i, part) in spec_parts.iter().enumerate() {
-        if *part != "_" {
-            let v: u64 = part.parse().map_err(|_| {
-                format!("invalid input at position {i}: expected u64 or '_', got {part:?}")
-            })?;
-            inputs[i].value = Some(v);
-            if inputs[i].owner != my_id {
-                let source = if program.circuit.inputs[i].party.is_some() {
-                    "circuit party annotation"
-                } else {
-                    "ownership formula floor(i * parties / n_inputs)"
-                };
-                return Err(format!(
-                    "input {i} is owned by party {} (from {source}), not party {my_id}; \
-                     remove this value or move it to the correct party",
-                    inputs[i].owner
-                )
-                .into());
-            }
-        }
-    }
-
-    // Verify that every input owned by this party was explicitly provided.
-    for (i, assignment) in inputs.iter().enumerate() {
-        if assignment.owner == my_id && assignment.value.is_none() {
-            return Err(format!(
-                "input {i} is owned by this party ({my_id}), but was marked '_'; \
-                 you must provide a value for every input you own"
-            )
-            .into());
-        }
-    }
+    let inputs = parse_input_spec(program, input_spec, my_id, parties)?;
 
     let mut runner = runtime::Runner::new(network, backend, program.clone(), &inputs)?;
     let outputs = runner.run().await?;
@@ -307,7 +318,7 @@ struct GarblerMsg {
 
 async fn run_yao_two_party(
     program: &Program,
-    my_value: u64,
+    input_spec: &str,
     bits: usize,
     my_id: usize,
     addrs_str: &str,
@@ -329,17 +340,19 @@ async fn run_yao_two_party(
     let mut network = net::connect(config).await?;
     eprintln!("[party {my_id}] connected");
 
+    let inputs = parse_input_spec(program, input_spec, my_id, 2)?;
+
     if my_id == 0 {
-        garbler_run(program, my_value, bits, &mut network).await
+        garbler_run(program, &inputs, bits, &mut network).await
     } else {
-        evaluator_run(program, my_value, bits, &mut network).await
+        evaluator_run(program, &inputs, bits, &mut network).await
     }
 }
 
 /// Party 0 — builds and garbles the circuit, runs OT for party 1's inputs.
 async fn garbler_run(
     program: &Program,
-    my_value: u64,
+    inputs: &[runtime::InputAssignment],
     bits: usize,
     network: &mut net::Network,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -366,42 +379,48 @@ async fn garbler_run(
         backend.execute_instruction(instr, &mut state)?;
     }
 
-    // Set our own input labels (party 0 owns circuit input[0]).
-    let my_wire = program.circuit.inputs[0].wire;
-    backend.set_input(my_wire, my_value, runtime::Visibility::Secret, &mut state)?;
-
-    // Register evaluator's wire so its labels exist in the circuit.
-    let eval_wire = program.circuit.inputs[1].wire;
-    backend.register_evaluator_wire(eval_wire);
-
-    // ---- OT for evaluator's inputs ----
-    //
-    // For each bit of the evaluator's wire, we have (label₀, label₁).
-    // OT lets the evaluator obtain label_{σ} without us learning σ.
-
-    let ot_messages: Vec<(u128, u128)> = (0..bits)
-        .map(|bit_idx| {
-            let [l0, l1] = backend
-                .wire_label_pair(eval_wire, bit_idx)
-                .expect("evaluator wire labels must exist");
-            (l0, l1)
-        })
+    // Separate garbler-owned (party 0) and evaluator-owned (party 1) wires.
+    let garbler_inputs: Vec<(WireId, u64)> = inputs
+        .iter()
+        .filter(|a| a.owner == 0)
+        .map(|a| (a.wire, a.value.unwrap()))
+        .collect();
+    let eval_wires: Vec<WireId> = inputs
+        .iter()
+        .filter(|a| a.owner == 1)
+        .map(|a| a.wire)
         .collect();
 
-    // Round 1: generate and send A-points.
-    let (ot_sender, a_bytes) = OTSender::setup(bits);
-    network.send(1, &a_bytes).await?;
-    eprintln!("[garbler] OT round 1 sent ({} A-points)", bits);
+    // Set all garbler-owned input labels.
+    for &(wire, value) in &garbler_inputs {
+        backend.set_input(wire, value, runtime::Visibility::Secret, &mut state)?;
+    }
 
-    // Round 2: receive B-points from evaluator.
+    // Register all evaluator wires and collect OT messages.
+    // Flat order: [bits of wire₀, bits of wire₁, …] LSB-first, matching evaluator.
+    let mut ot_messages: Vec<(u128, u128)> = Vec::new();
+    for &wire in &eval_wires {
+        backend.register_evaluator_wire(wire);
+        for bit_idx in 0..bits {
+            let [l0, l1] = backend
+                .wire_label_pair(wire, bit_idx)
+                .expect("evaluator wire labels must exist after register_evaluator_wire");
+            ot_messages.push((l0, l1));
+        }
+    }
+
+    // ---- OT for all evaluator input bits ----
+    let n_ot = ot_messages.len();
+    let (ot_sender, a_bytes) = OTSender::setup(n_ot);
+    network.send(1, &a_bytes).await?;
+    eprintln!("[garbler] OT round 1 sent ({n_ot} A-points)");
+
     let b_bytes: Vec<[u8; 32]> = network.recv(1).await?;
     eprintln!("[garbler] OT round 2 received");
 
-    // Round 3: compute and bundle ciphertexts with the garbled circuit.
     let ot_ciphertexts = ot_sender.respond(&b_bytes, &ot_messages);
 
-    // Garble the circuit; finalize_garbler returns only the garbler's own
-    // active labels (evaluator's come from OT).
+    // Garble and send circuit bundle.
     let (garbled_circuit, garbler_active_labels, output_label_pairs) =
         backend.finalize_garbler();
 
@@ -418,56 +437,67 @@ async fn garbler_run(
         .await?;
     eprintln!("[garbler] sent garbled circuit bundle");
 
-    // Receive the decoded result from the evaluator.
-    let result: u64 = network.recv(1).await?;
-    println!("output[0]: {result}");
+    // Receive all decoded output values from the evaluator.
+    let results: Vec<u64> = network.recv(1).await?;
+    for (i, v) in results.iter().enumerate() {
+        println!("output[{i}]: {v}");
+    }
     Ok(())
 }
 
 /// Party 1 — participates in OT to obtain its input labels, then evaluates.
 async fn evaluator_run(
     program: &Program,
-    my_value: u64,
+    inputs: &[runtime::InputAssignment],
     bits: usize,
     network: &mut net::Network,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use garbledc::ot::OTReceiver;
 
-    // ---- OT for our own inputs ----
-    //
-    // Derive choice bits from our plaintext input (LSB first).
-    let choices: Vec<bool> = (0..bits).map(|i| (my_value >> i) & 1 == 1).collect();
+    // Collect evaluator-owned wires and values in program-input order.
+    // This order must match the garbler's OT message ordering.
+    let eval_inputs: Vec<(WireId, u64)> = inputs
+        .iter()
+        .filter(|a| a.owner == 1)
+        .map(|a| (a.wire, a.value.unwrap()))
+        .collect();
 
-    // Round 2: receive A-points from garbler.
+    // Choice bits: all bits of all evaluator wires, LSB-first per wire.
+    let choices: Vec<bool> = eval_inputs
+        .iter()
+        .flat_map(|&(_, v)| (0..bits).map(move |i| (v >> i) & 1 == 1))
+        .collect();
+
+    // ---- OT for all evaluator input bits ----
     let a_bytes: Vec<[u8; 32]> = network.recv(0).await?;
-    eprintln!("[evaluator] OT round 1 received");
+    eprintln!("[evaluator] OT round 1 received ({} A-points)", a_bytes.len());
 
-    // Compute B-points based on our choice bits.
     let (ot_receiver, b_bytes) = OTReceiver::choose(&a_bytes, &choices);
     network.send(0, &b_bytes).await?;
     eprintln!("[evaluator] OT round 2 sent");
 
-    // Receive the garbled circuit bundle (which includes OT round 3).
+    // Receive garbled circuit bundle (includes OT ciphertexts for our labels).
     let msg: GarblerMsg = network.recv(0).await?;
     eprintln!("[evaluator] received garbled circuit ({} gates)", msg.garbled_circuit.gates.len());
 
-    // Decrypt our input labels via OT round 3.
+    // Decrypt our input labels.
     let my_labels: Vec<u128> = ot_receiver.finish(&msg.ot_ciphertexts);
 
-    // Build the evaluator's input wire name → active label map.
-    let eval_wire = program.circuit.inputs[1].wire;
-    let eval_active: HashMap<String, u128> = (0..bits)
-        .map(|i| (format!("w{}_b{}", eval_wire.0, i), my_labels[i]))
-        .collect();
+    // Reconstruct evaluator's active label map across all owned wires.
+    let mut eval_active: HashMap<String, u128> = HashMap::new();
+    for (wire_idx, &(wire, _)) in eval_inputs.iter().enumerate() {
+        for bit_idx in 0..bits {
+            let name = format!("w{}_b{}", wire.0, bit_idx);
+            eval_active.insert(name, my_labels[wire_idx * bits + bit_idx]);
+        }
+    }
 
-    // Merge garbler's labels and our OT labels for evaluation.
+    // Merge with garbler's active labels and evaluate.
     let mut active_labels = msg.garbler_active_labels;
     active_labels.extend(eval_active);
-
-    // Evaluate the garbled circuit.
     let results = msg.garbled_circuit.evaluate(active_labels);
 
-    // Decode each output wire (bit by bit, then reconstruct u64).
+    // Decode all output wires bit by bit.
     let mut output_values: Vec<u64> = Vec::new();
     for &out_wire in &program.circuit.outputs {
         let mut value = 0u64;
@@ -483,9 +513,8 @@ async fn evaluator_run(
         output_values.push(value);
     }
 
-    // Send decoded result back to garbler.
-    network.send(0, &output_values[0]).await?;
-
+    // Send all decoded values to garbler and print locally.
+    network.send(0, &output_values).await?;
     for (i, v) in output_values.iter().enumerate() {
         println!("output[{i}]: {v}");
     }
