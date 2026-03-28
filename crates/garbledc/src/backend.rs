@@ -471,10 +471,11 @@ impl YaoBackend {
         //   If in2[j] == 1, add (in1 << j) to result
 
         // Generate partial products
+        let pp_wires: Vec<WireId> = (0..self.bit_width).map(|_| self.alloc_temp_wire()).collect();
         let mut partial_products = Vec::new();
 
         for j in 0..self.bit_width {
-            let pp_wire = WireId(out.0 + 30000 + j);
+            let pp_wire = pp_wires[j];
             self.init_wire(pp_wire);
 
             let b_bit = self.wire_bit_name(in2, j);
@@ -498,7 +499,7 @@ impl YaoBackend {
             // Result is 0
             for bit_idx in 0..self.bit_width {
                 let out_bit = self.wire_bit_name(out, bit_idx);
-                let zero_wire = format!("zero_const_{}", bit_idx);
+                let zero_wire = format!("zero_const_{}_{}", out.0, bit_idx);
 
                 // Create a constant 0 (a XOR a = 0)
                 let temp = self.wire_bit_name(in1, 0);
@@ -516,14 +517,14 @@ impl YaoBackend {
 
         // Add remaining partial products with shifts
         for j in 1..partial_products.len() {
-            let shifted_pp = WireId(out.0 + 40000 + j);
+            let shifted_pp = self.alloc_temp_wire();
             self.init_wire(shifted_pp);
 
             // Shift partial_products[j] left by j positions
             for i in 0..self.bit_width {
                 if i < j {
                     // Lower bits are 0
-                    let zero_wire = format!("zero_shift_{}_{}", j, i);
+                    let zero_wire = format!("zero_shift_{}_{}_{}", out.0, j, i);
                     let temp = self.wire_bit_name(in1, 0);
                     self.circuit
                         .add_gate(xor_logic(), &[&temp, &temp], &zero_wire);
@@ -537,7 +538,7 @@ impl YaoBackend {
                     let shifted_bit = self.wire_bit_name(shifted_pp, i);
 
                     // Copy using XOR with 0: a XOR 0 = a
-                    let zero_wire = format!("zero_copy_{}_{}", j, i);
+                    let zero_wire = format!("zero_copy_{}_{}_{}", out.0, j, i);
                     let temp = self.wire_bit_name(in1, 0);
                     self.circuit
                         .add_gate(xor_logic(), &[&temp, &temp], &zero_wire);
@@ -547,7 +548,7 @@ impl YaoBackend {
             }
 
             // Add to accumulator
-            let new_acc = WireId(out.0 + 50000 + j);
+            let new_acc = self.alloc_temp_wire();
             self.init_wire(new_acc);
             self.build_add_internal(accumulator, shifted_pp, new_acc);
             accumulator = new_acc;
@@ -559,7 +560,7 @@ impl YaoBackend {
             let out_bit = self.wire_bit_name(out, bit_idx);
 
             // Copy using identity: a XOR 0 = a
-            let zero_wire = format!("zero_final_{}", bit_idx);
+            let zero_wire = format!("zero_final_{}_{}", out.0, bit_idx);
             let temp = self.wire_bit_name(in1, 0);
             self.circuit
                 .add_gate(xor_logic(), &[&temp, &temp], &zero_wire);
