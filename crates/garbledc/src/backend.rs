@@ -618,15 +618,24 @@ impl YaoBackend {
     ///   wire) so the evaluator can decode the final result locally.
     pub fn finalize_garbler(
         &mut self,
-    ) -> (Circuit, std::collections::HashMap<String, u128>, std::collections::HashMap<String, [u128; 2]>) {
+    ) -> (Circuit, std::collections::HashMap<String, u128>, std::collections::HashMap<String, u8>) {
         self.circuit.garble();
-        let output_label_pairs = self
+        // Send only lsb(label₀) per output bit as the decode table.
+        // With the color-bit convention (lsb(label₀)=0, lsb(label₁)=1) enforced
+        // during label generation, this is always 0 — but we keep it explicit so
+        // the evaluator's decoding logic is independent of that internal invariant.
+        let decode_table = self
             .circuit
             .outputs
             .iter()
-            .filter_map(|name| self.circuit.labels.get(name).map(|&p| (name.clone(), p)))
+            .filter_map(|name| {
+                self.circuit
+                    .labels
+                    .get(name)
+                    .map(|&[l0, _]| (name.clone(), (l0 & 1) as u8))
+            })
             .collect();
-        (self.circuit.clone(), self.input_labels.clone(), output_label_pairs)
+        (self.circuit.clone(), self.input_labels.clone(), decode_table)
     }
 
     fn evaluate_circuit(&mut self) -> Result<(), BackendError> {
@@ -658,14 +667,11 @@ impl YaoBackend {
                             for bit_idx in 0..self.bit_width {
                                 let bit_wire_name = self.wire_bit_name(wire, bit_idx);
 
-                                // this part should be replaced by sending the result to the garbler and awaiting
+                                // Decode using one bit per output wire:
+                                // bit = lsb(active_label) XOR lsb(label₀)
                                 if let Some(&output_label) = results.get(&bit_wire_name) {
-                                    let labels: &[u128; 2] = &self.circuit.labels[&bit_wire_name];
-                                    let bit = if output_label == labels[1] {
-                                        1u64
-                                    } else {
-                                        0u64
-                                    };
+                                    let decode_bit = self.circuit.labels[&bit_wire_name][0] & 1;
+                                    let bit = ((output_label & 1) ^ decode_bit) as u64;
                                     value |= bit << bit_idx;
                                 }
                             }

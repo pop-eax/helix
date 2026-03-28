@@ -263,8 +263,8 @@ struct GarblerMsg {
     garbled_circuit: garbledc::circuit::Circuit,
     /// Garbler's own active input labels (one per bit wire).
     garbler_active_labels: HashMap<String, u128>,
-    /// Both labels per output bit wire so the evaluator can decode.
-    output_label_pairs: HashMap<String, [u128; 2]>,
+    /// One decode bit (lsb of label₀) per output bit wire.
+    output_label_pairs: HashMap<String, u8>,
     /// OT round 3: encrypted label pairs for every evaluator input bit.
     /// Index order matches the evaluator's OT A-point messages.
     ot_ciphertexts: Vec<(u128, u128)>,
@@ -438,10 +438,10 @@ async fn evaluator_run(
         let mut value = 0u64;
         for bit_idx in 0..bits {
             let bit_name = format!("w{}_b{}", out_wire.0, bit_idx);
-            if let (Some(&active), Some(&pair)) =
+            if let (Some(&active), Some(&decode_bit)) =
                 (results.get(&bit_name), msg.output_label_pairs.get(&bit_name))
             {
-                let bit = if active == pair[1] { 1u64 } else { 0u64 };
+                let bit = ((active & 1) ^ (decode_bit as u128)) as u64;
                 value |= bit << bit_idx;
             }
         }

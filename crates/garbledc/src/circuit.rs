@@ -26,7 +26,12 @@ impl Circuit {
         if let Some(&labels) = self.labels.get(wire_name) {
             labels
         } else {
-            let new_labels = [super::random_label(), super::random_label()];
+            // Enforce color-bit convention: lsb(label₀) = 0, lsb(label₁) = 1.
+            // This means the active label's LSB is the wire's truth value, so
+            // output decoding only requires one bit per wire (lsb(label₀)).
+            let label0 = super::random_label() & !1u128;
+            let label1 = super::random_label() | 1u128;
+            let new_labels = [label0, label1];
             self.labels.insert(wire_name.to_string(), new_labels);
             new_labels
         }
