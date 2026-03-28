@@ -208,10 +208,12 @@ async fn run_bgw_networked(
         .into());
     }
 
-    // Ownership assignment: owner(i) = floor(i * parties / n_inputs).
-    // This deterministically splits n_inputs evenly across parties.
-    // All parties derive the same owner for each position without communication.
-    let default_owner = |i: usize| -> usize { i * parties / n_inputs };
+    // Ownership: use the party annotation stored in the circuit when present;
+    // fall back to the deterministic formula floor(i * parties / n_inputs) otherwise.
+    // All parties compute the same owner for each position without communication.
+    let owner_of = |i: usize, inp: &ir::lir::Input| -> usize {
+        inp.party.map(|p| p.0).unwrap_or_else(|| i * parties / n_inputs)
+    };
 
     let mut inputs: Vec<runtime::InputAssignment> = program
         .circuit
@@ -220,7 +222,7 @@ async fn run_bgw_networked(
         .enumerate()
         .map(|(i, inp)| runtime::InputAssignment {
             wire: inp.wire,
-            owner: default_owner(i),
+            owner: owner_of(i, inp),
             value: None,
         })
         .collect();
@@ -231,16 +233,30 @@ async fn run_bgw_networked(
                 format!("invalid input at position {i}: expected u64 or '_', got {part:?}")
             })?;
             inputs[i].value = Some(v);
-            // Ownership is already set deterministically; just validate.
             if inputs[i].owner != my_id {
+                let source = if program.circuit.inputs[i].party.is_some() {
+                    "circuit party annotation"
+                } else {
+                    "ownership formula floor(i * parties / n_inputs)"
+                };
                 return Err(format!(
-                    "position {i} is assigned to party {} by the ownership formula \
-                     (floor({i} * {parties} / {n_inputs})), not party {my_id}; \
-                     move this value to the correct party",
+                    "input {i} is owned by party {} (from {source}), not party {my_id}; \
+                     remove this value or move it to the correct party",
                     inputs[i].owner
                 )
                 .into());
             }
+        }
+    }
+
+    // Verify that every input owned by this party was explicitly provided.
+    for (i, assignment) in inputs.iter().enumerate() {
+        if assignment.owner == my_id && assignment.value.is_none() {
+            return Err(format!(
+                "input {i} is owned by this party ({my_id}), but was marked '_'; \
+                 you must provide a value for every input you own"
+            )
+            .into());
         }
     }
 
