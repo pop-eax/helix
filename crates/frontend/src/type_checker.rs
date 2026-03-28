@@ -268,9 +268,12 @@ impl TypeChecker {
 
     fn check_for_loop(&mut self, for_loop: &ForLoop) -> TypeCheckResult<()> {
         self.enter_scope();
-        // For loop variable is implicitly an integer (index)
-        // We don't have an integer type in the AST, but the loop variable is used as an index
-        // For now, we'll just check the body
+        // Register loop variable as a Field<64> constant (loop indices are integers).
+        self.declare_variable(
+            for_loop.var_name.clone(),
+            TypeExpr::Base(BaseType::Field(FieldType { size: 64 })),
+            Visibility::Public,
+        );
         self.check_block(&for_loop.body)?;
         self.exit_scope();
         Ok(())

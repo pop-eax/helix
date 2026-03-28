@@ -38,6 +38,9 @@ struct Codegen {
     functions: HashMap<String, FunctionDef>,
     variables: Vec<HashMap<String, HirValue>>, // Stack of scopes
     current_function: Option<String>,
+    /// Maps an array's representative HirValue to its element HirValues.
+    /// Used to resolve arr[constant_idx] at codegen time without emitting ArrayLoad.
+    arrays: HashMap<HirValue, Vec<HirValue>>,
 }
 
 impl Codegen {
@@ -48,6 +51,7 @@ impl Codegen {
             functions: HashMap::new(),
             variables: Vec::new(),
             current_function: None,
+            arrays: HashMap::new(),
         }
     }
 
@@ -110,19 +114,39 @@ impl Codegen {
         let entry_block = self.builder.create_block();
         self.builder.set_current_block(entry_block);
 
-        // Convert parameters
+        // Convert parameters — array params are expanded to N scalar params.
         let mut hir_params = Vec::new();
-        for (idx, param) in func_def.params.iter().enumerate() {
-            let hir_param = HirParam {
-                name: param.name.clone(),
-                ty: self.convert_type(&param.ty)?,
-                visibility: self.convert_visibility(&param.visibility),
-            };
-            hir_params.push(hir_param);
-
-            // Add parameter to scope as a Param value
-            let param_value = HirValue::Param(idx);
-            self.declare_variable(param.name.clone(), param_value);
+        let mut param_idx = 0usize;
+        self.arrays.clear();
+        for param in &func_def.params {
+            let ty = self.convert_type(&param.ty)?;
+            match &ty {
+                HirType::Array { element_type, size } => {
+                    let base_idx = param_idx;
+                    let mut elements = Vec::new();
+                    for j in 0..*size {
+                        hir_params.push(HirParam {
+                            name: format!("{}_{}", param.name, j),
+                            ty: *element_type.clone(),
+                            visibility: self.convert_visibility(&param.visibility),
+                        });
+                        elements.push(HirValue::Param(param_idx));
+                        param_idx += 1;
+                    }
+                    let sentinel = HirValue::Param(base_idx);
+                    self.arrays.insert(sentinel.clone(), elements);
+                    self.declare_variable(param.name.clone(), sentinel);
+                }
+                _ => {
+                    hir_params.push(HirParam {
+                        name: param.name.clone(),
+                        ty,
+                        visibility: self.convert_visibility(&param.visibility),
+                    });
+                    self.declare_variable(param.name.clone(), HirValue::Param(param_idx));
+                    param_idx += 1;
+                }
+            }
         }
 
         // Convert function body
@@ -279,38 +303,42 @@ impl Codegen {
     }
 
     fn convert_for_loop(&mut self, for_loop: &ForLoop) -> CodegenResult<()> {
-        // For loops in MPC are typically unrolled
-        // For now, we'll create a simple unrolled version
-        
-        let loop_body_block = self.builder.create_block();
-        let exit_block = self.builder.create_block();
-
-        // Enter loop scope
-        self.enter_scope();
-
-        // Unroll the loop
+        // Fully unroll: each iteration gets its own scope, and outer variable
+        // assignments are propagated back to the enclosing scope.
         for i in for_loop.start..for_loop.end {
-            // Create a constant for the loop variable value
-            let loop_var_value = HirValue::Constant(HirConstant::Field {
-                value: i,
-                size: 64, // Assuming 64-bit for loop indices
-            });
-            
-            // Store loop variable (in a real implementation, this would be an instruction)
-            self.declare_variable(for_loop.var_name.clone(), loop_var_value);
-            
-            // Convert loop body
-            self.builder.set_current_block(loop_body_block);
-            self.convert_block(&for_loop.body, loop_body_block)?;
+            self.enter_scope();
+            self.declare_variable(
+                for_loop.var_name.clone(),
+                HirValue::Constant(HirConstant::Field { value: i, size: 64 }),
+            );
+            // Emit body statements into the current block without resetting it;
+            // any nested if/else will leave the builder on the correct merge block.
+            for stmt in &for_loop.body.statements {
+                self.convert_statement(stmt)?;
+            }
+            // Propagate any assignments to pre-existing outer variables back up.
+            self.propagate_scope_to_parent();
+            self.exit_scope();
         }
-
-        self.exit_scope();
-
-        // Jump to exit
-        self.builder.set_terminator(HirTerminator::Jump { target: exit_block });
-        self.builder.set_current_block(exit_block);
-
         Ok(())
+    }
+
+    /// Copies updates from the innermost scope back to the parent scope,
+    /// but only for variables that already existed in the parent (i.e. outer
+    /// accumulators like `sum`). Loop-local declarations are NOT propagated.
+    fn propagate_scope_to_parent(&mut self) {
+        if self.variables.len() < 2 {
+            return;
+        }
+        let len = self.variables.len();
+        let updates: Vec<(String, HirValue)> = self.variables[len - 1]
+            .iter()
+            .filter(|(name, _)| self.variables[len - 2].contains_key(*name))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (name, value) in updates {
+            self.variables[len - 2].insert(name, value);
+        }
     }
 
     fn convert_return(&mut self, ret: &ReturnStatement) -> CodegenResult<()> {
@@ -649,7 +677,27 @@ impl Codegen {
         match access {
             ExprAccess::Array(index_expr) => {
                 let index = self.convert_expression(index_expr)?;
-                let ty = HirType::Field { size: 64 }; // Infer from base type
+                // If this array is tracked in the codegen map, resolve at compile time.
+                if let Some(elements) = self.arrays.get(base).cloned() {
+                    return match &index {
+                        HirValue::Constant(HirConstant::Field { value: idx, .. }) => {
+                            elements.get(*idx as usize).cloned().ok_or_else(|| {
+                                CodegenError::InvalidTypeConversion(format!(
+                                    "Array index {} out of bounds (size {})",
+                                    idx,
+                                    elements.len()
+                                ))
+                            })
+                        }
+                        _ => Err(CodegenError::InvalidTypeConversion(
+                            "Dynamic array indexing not supported — \
+                             use compile-time constants or for-loops with constant bounds"
+                                .to_string(),
+                        )),
+                    };
+                }
+                // Fallback: emit ArrayLoad (will error at lowering for unsupported cases).
+                let ty = HirType::Field { size: 64 };
                 let value_id = self.builder.add_instruction(
                     HirInstructionKind::ArrayLoad {
                         array: base.clone(),
