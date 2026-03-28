@@ -457,20 +457,17 @@ impl Codegen {
             ));
         }
 
-        // Convert all elements
-        let mut element_values = Vec::new();
+        let mut elements = Vec::new();
         for elem in &arr.elements {
-            element_values.push(self.convert_expression(elem)?);
+            elements.push(self.convert_expression(elem)?);
         }
 
-        // For now, we'll create individual load instructions
-        // In a full implementation, we'd allocate an array and store values
-        // This is a simplified version
-        let first_elem = element_values[0].clone();
-        
-        // Create array allocation instruction (simplified)
-        // In reality, we'd need to handle array storage properly
-        Ok(first_elem) // Placeholder
+        // Same sentinel approach as struct literals: reserve a value ID without
+        // emitting an instruction, store all elements in the arrays map.
+        let sentinel_id = self.builder.new_value_id();
+        let sentinel = HirValue::Instruction(sentinel_id);
+        self.arrays.insert(sentinel.clone(), elements);
+        Ok(sentinel)
     }
 
     fn convert_struct_literal(&mut self, struct_lit: &StructLiteral) -> CodegenResult<HirValue> {
