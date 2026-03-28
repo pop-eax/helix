@@ -1,0 +1,17 @@
+// Struct + function call lowering test.
+//
+// Two parties contribute a 2D point each; compute the squared Euclidean distance.
+//   output[0] = (a.x - b.x)^2 + (a.y - b.y)^2
+//
+// Example (clear):
+//   runner struct_test.ir -i "3,4,0,0" -b clear   => output[0]: 25  (3^2 + 4^2)
+struct Point {
+    Field<64> x;
+    Field<64> y;
+}
+
+fn sq_dist(Secret Point a, Secret Point b) -> Field<64> {
+    let Public Field<64> dx = a.x - b.x;
+    let Public Field<64> dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}

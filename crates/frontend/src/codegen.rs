@@ -41,6 +41,13 @@ struct Codegen {
     /// Maps an array's representative HirValue to its element HirValues.
     /// Used to resolve arr[constant_idx] at codegen time without emitting ArrayLoad.
     arrays: HashMap<HirValue, Vec<HirValue>>,
+    /// Maps a struct instance's sentinel HirValue to its field values by name.
+    /// Used to resolve struct.field at codegen time without emitting StructField.
+    struct_fields: HashMap<HirValue, HashMap<String, HirValue>>,
+    /// > 0 when we are inlining a function call; prevents Return from emitting a terminator.
+    inline_depth: usize,
+    /// Captures the return value of an inlined function.
+    inline_return: Option<HirValue>,
 }
 
 impl Codegen {
@@ -52,6 +59,9 @@ impl Codegen {
             variables: Vec::new(),
             current_function: None,
             arrays: HashMap::new(),
+            struct_fields: HashMap::new(),
+            inline_depth: 0,
+            inline_return: None,
         }
     }
 
@@ -114,17 +124,18 @@ impl Codegen {
         let entry_block = self.builder.create_block();
         self.builder.set_current_block(entry_block);
 
-        // Convert parameters — array params are expanded to N scalar params.
+        // Convert parameters — array and struct params are expanded to N scalar params.
         let mut hir_params = Vec::new();
         let mut param_idx = 0usize;
         self.arrays.clear();
+        self.struct_fields.clear();
         for param in &func_def.params {
             let ty = self.convert_type(&param.ty)?;
-            match &ty {
-                HirType::Array { element_type, size } => {
+            match ty {
+                HirType::Array { ref element_type, size } => {
                     let base_idx = param_idx;
                     let mut elements = Vec::new();
-                    for j in 0..*size {
+                    for j in 0..size {
                         hir_params.push(HirParam {
                             name: format!("{}_{}", param.name, j),
                             ty: *element_type.clone(),
@@ -135,6 +146,26 @@ impl Codegen {
                     }
                     let sentinel = HirValue::Param(base_idx);
                     self.arrays.insert(sentinel.clone(), elements);
+                    self.declare_variable(param.name.clone(), sentinel);
+                }
+                HirType::Struct { ref name } => {
+                    let struct_def = self.structs.get(name)
+                        .ok_or_else(|| CodegenError::UndefinedStruct(name.clone()))?
+                        .clone();
+                    let base_idx = param_idx;
+                    let mut fields = HashMap::new();
+                    for field in &struct_def.fields {
+                        let field_ty = self.convert_type(&field.ty)?;
+                        hir_params.push(HirParam {
+                            name: format!("{}_{}", param.name, field.name),
+                            ty: field_ty,
+                            visibility: self.convert_visibility(&param.visibility),
+                        });
+                        fields.insert(field.name.clone(), HirValue::Param(param_idx));
+                        param_idx += 1;
+                    }
+                    let sentinel = HirValue::Param(base_idx);
+                    self.struct_fields.insert(sentinel.clone(), fields);
                     self.declare_variable(param.name.clone(), sentinel);
                 }
                 _ => {
@@ -343,7 +374,19 @@ impl Codegen {
 
     fn convert_return(&mut self, ret: &ReturnStatement) -> CodegenResult<()> {
         let value = self.convert_expression(&ret.value)?;
-        self.builder.set_terminator(HirTerminator::Return { value });
+        if self.inline_depth > 0 {
+            // Inlining: capture the return value; the caller will extract it.
+            self.inline_return = Some(value);
+        } else {
+            if self.struct_fields.contains_key(&value) {
+                return Err(CodegenError::InvalidTypeConversion(
+                    "Functions that return a struct type can only be used via inlined calls; \
+                     struct values cannot be lowered to a single circuit output wire"
+                        .to_string(),
+                ));
+            }
+            self.builder.set_terminator(HirTerminator::Return { value });
+        }
         Ok(())
     }
 
@@ -431,59 +474,65 @@ impl Codegen {
     }
 
     fn convert_struct_literal(&mut self, struct_lit: &StructLiteral) -> CodegenResult<HirValue> {
-        // Get struct definition
+        // Convert field values in definition order.
         let struct_def = self.structs.get(&struct_lit.struct_name)
-            .ok_or_else(|| CodegenError::UndefinedStruct(struct_lit.struct_name.clone()))?;
+            .ok_or_else(|| CodegenError::UndefinedStruct(struct_lit.struct_name.clone()))?
+            .clone();
 
-        // Convert field values
-        let mut field_values = HashMap::new();
-        for field_init in &struct_lit.fields {
-            let value = self.convert_expression(&field_init.value)?;
-            field_values.insert(field_init.name.clone(), value);
+        let mut fields = HashMap::new();
+        for field_def in &struct_def.fields {
+            let init = struct_lit.fields.iter()
+                .find(|fi| fi.name == field_def.name)
+                .ok_or_else(|| CodegenError::InvalidTypeConversion(
+                    format!("Missing field '{}' in struct literal '{}'", field_def.name, struct_lit.struct_name)
+                ))?;
+            let value = self.convert_expression(&init.value)?;
+            fields.insert(field_def.name.clone(), value);
         }
 
-        // Create struct allocation and field initialization
-        // For now, return a placeholder
-        // In full implementation, we'd create StructAlloc and field store instructions
-        let struct_ty = HirType::Struct {
-            name: struct_lit.struct_name.clone(),
-        };
-        
-        // Create a placeholder instruction
-        let value_id = self.builder.add_instruction(
-            HirInstructionKind::StructAlloc {
-                struct_name: struct_lit.struct_name.clone(),
-            },
-            struct_ty,
-        );
-        
-        Ok(HirValue::Instruction(value_id))
+        // Reserve a unique value ID as a sentinel (no instruction emitted — the sentinel
+        // never appears in the HIR instruction list, so the lowering won't process it).
+        let sentinel_id = self.builder.new_value_id();
+        let sentinel = HirValue::Instruction(sentinel_id);
+        self.struct_fields.insert(sentinel.clone(), fields);
+        Ok(sentinel)
     }
 
     fn convert_function_call(&mut self, call: &FunctionCall) -> CodegenResult<HirValue> {
-        // Get function definition and return type first
-        let return_type = {
-            let func_def = self.functions.get(&call.name)
-                .ok_or_else(|| CodegenError::UndefinedFunction(call.name.clone()))?;
-            self.convert_type(&func_def.return_type)?
-        };
+        let func_def = self.functions.get(&call.name)
+            .ok_or_else(|| CodegenError::UndefinedFunction(call.name.clone()))?
+            .clone();
 
-        // Convert arguments
+        // Evaluate arguments in the caller's scope before entering the callee's scope.
         let mut args = Vec::new();
         for arg in &call.arguments {
             args.push(self.convert_expression(arg)?);
         }
 
-        // Create call instruction
-        let value_id = self.builder.add_instruction(
-            HirInstructionKind::Call {
-                function_name: call.name.clone(),
-                args,
-            },
-            return_type,
-        );
+        // Inline the callee: bind params to args in a fresh scope, compile the body,
+        // capture the return value instead of emitting a terminator.
+        self.enter_scope();
+        self.inline_depth += 1;
 
-        Ok(HirValue::Instruction(value_id))
+        for (param, arg) in func_def.params.iter().zip(args.iter()) {
+            // For array/struct params the arg is already a sentinel with its map entry
+            // registered; just bind the param name to the same sentinel.
+            self.declare_variable(param.name.clone(), arg.clone());
+        }
+
+        for stmt in &func_def.body.statements {
+            self.convert_statement(stmt)?;
+            if self.inline_return.is_some() {
+                break;
+            }
+        }
+
+        self.inline_depth -= 1;
+        self.exit_scope();
+
+        self.inline_return.take().ok_or_else(|| CodegenError::ControlFlowError(
+            format!("Inlined function '{}' has no reachable return statement", call.name)
+        ))
     }
 
     fn convert_binary_op(&mut self, bin_op: &BinaryOp) -> CodegenResult<HirValue> {
@@ -708,7 +757,14 @@ impl Codegen {
                 Ok(HirValue::Instruction(value_id))
             }
             ExprAccess::Field(field_name) => {
-                // Infer struct type from base - simplified for now
+                // If this struct instance is tracked in the codegen map, resolve at compile time.
+                if let Some(fields) = self.struct_fields.get(base).cloned() {
+                    return fields.get(field_name).cloned()
+                        .ok_or_else(|| CodegenError::InvalidTypeConversion(
+                            format!("Struct has no field '{}'", field_name)
+                        ));
+                }
+                // Fallback: emit StructField (will error at lowering for untracked structs).
                 let ty = HirType::Field { size: 64 };
                 let value_id = self.builder.add_instruction(
                     HirInstructionKind::StructField {

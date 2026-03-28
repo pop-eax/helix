@@ -1,0 +1,20 @@
+// Function call (inlining) test.
+//
+// inner computes a*b + c; outer calls it twice and sums the results.
+//   output[0] = (a*b + c) + (d*e + f)
+//
+// Example (clear):
+//   runner func_call_test.ir -i "2,3,1,4,5,2" -b clear
+//   => (2*3+1) + (4*5+2) = 7 + 22 = 29
+fn inner(Secret Field<64> a, Secret Field<64> b, Secret Field<64> c) -> Field<64> {
+    return a * b + c;
+}
+
+fn outer(
+    Secret Field<64> a, Secret Field<64> b, Secret Field<64> c,
+    Secret Field<64> d, Secret Field<64> e, Secret Field<64> f
+) -> Field<64> {
+    let Public Field<64> r1 = inner(a, b, c);
+    let Public Field<64> r2 = inner(d, e, f);
+    return r1 + r2;
+}

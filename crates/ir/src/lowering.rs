@@ -49,10 +49,10 @@ impl Lowerer {
     }
 
     fn lower_program(&mut self, hir: &HirProgram, metadata: Metadata) -> LoweringResult<Program> {
-        // For now, we'll lower the first function
-        // In a full implementation, we'd handle multiple functions and calls
-        
-        if let Some(function) = hir.functions.first() {
+        // Lower the last function — by convention, helper functions come first and
+        // the circuit entry point is last. Helper functions are inlined at codegen
+        // time, so only the entry function's HIR needs to be lowered to LIR.
+        if let Some(function) = hir.functions.last() {
             self.lower_function(function)?;
         }
 
