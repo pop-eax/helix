@@ -12,6 +12,8 @@ pub struct YaoBackend {
     input_labels: HashMap<String, u128>,
     garbled: bool,
     evaluation_cache: HashMap<WireId, u64>,
+    /// Counter for allocating collision-free temporary wire IDs.
+    next_temp_wire: usize,
 }
 
 impl YaoBackend {
@@ -23,7 +25,138 @@ impl YaoBackend {
             input_labels: HashMap::new(),
             garbled: false,
             evaluation_cache: HashMap::new(),
+            next_temp_wire: 1_000_000,
         }
+    }
+
+    /// Returns a fresh WireId that won't collide with LIR-assigned wires or
+    /// other temp wires.
+    fn alloc_temp_wire(&mut self) -> WireId {
+        let id = self.next_temp_wire;
+        self.next_temp_wire += 1;
+        WireId(id)
+    }
+
+    /// Creates circuit-input wires for a compile-time constant and registers the
+    /// correct labels so the garbler always provides the right bit values.
+    /// Returns the allocated WireId (already marked as initialized).
+    fn load_constant(&mut self, value: u64) -> WireId {
+        let wire = self.alloc_temp_wire();
+        for bit_idx in 0..self.bit_width {
+            let bit = ((value >> bit_idx) & 1) as u8;
+            let wire_name = self.wire_bit_name(wire, bit_idx);
+            self.circuit.add_input(&wire_name);
+            if let Some(label) = self.circuit.get_label(&wire_name, bit) {
+                self.input_labels.insert(wire_name, label);
+            }
+        }
+        self.initialized_wires.insert(wire, true);
+        wire
+    }
+
+    fn build_add_constant(&mut self, input: WireId, constant: u64, output: WireId) {
+        let c = self.load_constant(constant);
+        self.build_add(input, c, output);
+    }
+
+    fn build_sub_constant(&mut self, input: WireId, constant: u64, output: WireId) {
+        let c = self.load_constant(constant);
+        self.build_sub(input, c, output);
+    }
+
+    fn build_mul_constant(&mut self, input: WireId, constant: u64, output: WireId) {
+        let c = self.load_constant(constant);
+        self.build_mul(input, c, output);
+    }
+
+    /// N-bit multiplexer: if sel[0] == 1 then out = a, else out = b.
+    /// sel is treated as a 1-bit signal (only bit 0 is used).
+    fn build_mux(&mut self, sel: WireId, a: WireId, b: WireId, out: WireId) {
+        self.init_wire(sel);
+        self.init_wire(a);
+        self.init_wire(b);
+        self.init_wire(out);
+        let sel_b0 = self.wire_bit_name(sel, 0);
+        for i in 0..self.bit_width {
+            let ai = self.wire_bit_name(a, i);
+            let bi = self.wire_bit_name(b, i);
+            let oi = self.wire_bit_name(out, i);
+            let diff   = format!("mux_diff_{}_{}_{}_{}_{}", sel.0, a.0, b.0, out.0, i);
+            let masked = format!("mux_mask_{}_{}_{}_{}_{}", sel.0, a.0, b.0, out.0, i);
+            // diff   = a XOR b
+            // masked = sel AND diff
+            // out    = masked XOR b   → a when sel=1, b when sel=0
+            self.circuit.add_gate(xor_logic(), &[&ai, &bi], &diff);
+            self.circuit.add_gate(and_logic(), &[&sel_b0, &diff], &masked);
+            self.circuit.add_gate(xor_logic(), &[&masked, &bi], &oi);
+            self.circuit.add_output(&oi);
+        }
+    }
+
+    /// Unsigned N-bit restoring division: quotient = dividend / divisor.
+    /// Processes bits MSB-first; each iteration shifts the partial remainder
+    /// left by one, inserts the next dividend bit, and conditionally subtracts
+    /// the divisor.
+    fn build_div(&mut self, dividend: WireId, divisor: WireId, quotient: WireId) {
+        let n = self.bit_width;
+        self.init_wire(dividend);
+        self.init_wire(divisor);
+        self.init_wire(quotient);
+
+        // Start with partial remainder = 0.
+        let mut rem = self.load_constant(0);
+
+        for step in 0..n {
+            let bit_i = n - 1 - step; // MSB first → LSB last
+
+            // --- Shift rem left by 1, insert dividend[bit_i] at bit 0 ---
+            let shifted = self.alloc_temp_wire();
+            self.init_wire(shifted);
+
+            let div_bit = self.wire_bit_name(dividend, bit_i);
+            let s0 = self.wire_bit_name(shifted, 0);
+            self.circuit.add_gate(and_logic(), &[&div_bit, &div_bit], &s0); // copy
+
+            for j in 1..n {
+                let rem_bit = self.wire_bit_name(rem, j - 1);
+                let sj = self.wire_bit_name(shifted, j);
+                self.circuit.add_gate(and_logic(), &[&rem_bit, &rem_bit], &sj); // copy
+            }
+
+            // --- candidate = shifted - divisor ---
+            let candidate = self.alloc_temp_wire();
+            self.init_wire(candidate);
+            self.build_sub(shifted, divisor, candidate);
+
+            // --- borrow = (shifted < divisor) ---
+            let borrow = self.alloc_temp_wire();
+            self.build_less_than(shifted, divisor, borrow);
+
+            // --- quotient[bit_i] = NOT(borrow[0]) ---
+            let q_bit   = self.wire_bit_name(quotient, bit_i);
+            let borrow0 = self.wire_bit_name(borrow, 0);
+            self.circuit.add_gate(not_logic(), &[&borrow0], &q_bit);
+            self.circuit.add_output(&q_bit);
+
+            // --- new_rem = borrow ? shifted : candidate ---
+            let new_rem = self.alloc_temp_wire();
+            self.build_mux(borrow, shifted, candidate, new_rem);
+            rem = new_rem;
+        }
+    }
+
+    /// Unsigned N-bit modulo: remainder = dividend % divisor.
+    fn build_mod(&mut self, dividend: WireId, divisor: WireId, remainder: WireId) {
+        // remainder = dividend - quotient * divisor
+        let quotient = self.alloc_temp_wire();
+        self.init_wire(quotient);
+        self.build_div(dividend, divisor, quotient);
+
+        let product = self.alloc_temp_wire();
+        self.init_wire(product);
+        self.build_mul(quotient, divisor, product);
+
+        self.build_sub(dividend, product, remainder);
     }
 
     fn wire_bit_name(&self, wire: WireId, bit_idx: usize) -> String {
@@ -142,47 +275,38 @@ impl YaoBackend {
         self.init_wire(in2);
         self.init_wire(out);
 
-        // Step 1: Invert in2 (create ~b)
-        let not_in2 = WireId(in2.0 + 10000); // Temporary wire for ~b
+        // Step 1: Invert in2 (create ~b). Use alloc_temp_wire so this method
+        // is safe to call multiple times with the same in2 (e.g., inside loops).
+        let not_in2 = self.alloc_temp_wire();
         self.init_wire(not_in2);
 
         for bit_idx in 0..self.bit_width {
             let b = self.wire_bit_name(in2, bit_idx);
             let not_b = self.wire_bit_name(not_in2, bit_idx);
-
             self.circuit.add_gate(not_logic(), &[&b], &not_b);
         }
 
-        // Step 2: Add 1 to ~b (create ~b + 1)
-        let neg_in2 = WireId(in2.0 + 20000); // Temporary wire for -b
+        // Step 2: Add 1 to ~b to get two's complement negation.
+        let neg_in2 = self.alloc_temp_wire();
         self.init_wire(neg_in2);
 
-        // Bit 0: XOR with 1 (flip bit 0)
         let not_b0 = self.wire_bit_name(not_in2, 0);
         let neg_b0 = self.wire_bit_name(neg_in2, 0);
-
-        // not_b[0] XOR 1 = NOT(not_b[0])
         self.circuit.add_gate(not_logic(), &[&not_b0], &neg_b0);
 
-        // Carry for bit 0: AND with 1 = not_b[0]
-        let c0 = format!("neg_carry_{}_0", in2.0);
-        self.circuit.add_gate(and_logic(), &[&not_b0, &not_b0], &c0); // Effectively just not_b[0]
+        let c0 = format!("neg_carry_{}_0", not_in2.0);
+        self.circuit.add_gate(and_logic(), &[&not_b0, &not_b0], &c0);
 
-        // Bits 1..bit_width: Propagate carry
         for i in 1..self.bit_width {
             let not_b = self.wire_bit_name(not_in2, i);
             let neg_b = self.wire_bit_name(neg_in2, i);
-            let cin = format!("neg_carry_{}_{}", in2.0, i - 1);
-            let cout = format!("neg_carry_{}_{}", in2.0, i);
-
-            // neg_b[i] = not_b[i] XOR carry
+            let cin  = format!("neg_carry_{}_{}", not_in2.0, i - 1);
+            let cout = format!("neg_carry_{}_{}", not_in2.0, i);
             self.circuit.add_gate(xor_logic(), &[&not_b, &cin], &neg_b);
-
-            // carry_out = not_b[i] AND carry
             self.circuit.add_gate(and_logic(), &[&not_b, &cin], &cout);
         }
 
-        // Step 3: Add in1 + (-in2) using existing adder
+        // Step 3: in1 + (-in2)
         self.build_add_internal(in1, neg_in2, out);
     }
 
@@ -700,10 +824,35 @@ impl Backend for YaoBackend {
                 Ok(())
             }
 
-            _ => Err(BackendError::BackendError(format!(
-                "Instruction {:?} not yet implemented",
-                instruction
-            ))),
+            Instruction::AddConstant { vis, input, constant, output, .. } => {
+                self.build_add_constant(*input, *constant, *output);
+                state.set_wire(*output, WireValue::Secret, *vis);
+                Ok(())
+            }
+
+            Instruction::SubConstant { vis, input, constant, output, .. } => {
+                self.build_sub_constant(*input, *constant, *output);
+                state.set_wire(*output, WireValue::Secret, *vis);
+                Ok(())
+            }
+
+            Instruction::MulConstant { vis, input, constant, output, .. } => {
+                self.build_mul_constant(*input, *constant, *output);
+                state.set_wire(*output, WireValue::Secret, *vis);
+                Ok(())
+            }
+
+            Instruction::Div { vis, input1, input2, output, .. } => {
+                self.build_div(*input1, *input2, *output);
+                state.set_wire(*output, WireValue::Secret, vis.output_visibility());
+                Ok(())
+            }
+
+            Instruction::Mod { vis, input1, input2, output, .. } => {
+                self.build_mod(*input1, *input2, *output);
+                state.set_wire(*output, WireValue::Secret, vis.output_visibility());
+                Ok(())
+            }
         }
     }
 }
