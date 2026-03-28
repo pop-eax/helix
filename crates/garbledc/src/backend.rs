@@ -635,7 +635,13 @@ impl YaoBackend {
                     .map(|&[l0, _]| (name.clone(), (l0 & 1) as u8))
             })
             .collect();
-        (self.circuit.clone(), self.input_labels.clone(), decode_table)
+        // Strip label pairs before sending to the evaluator.  The evaluator
+        // only needs the garbled gate tables; having both labels for every wire
+        // would let it recover the garbler's input bits by comparing active
+        // labels against circuit.labels directly.
+        let mut evaluator_circuit = self.circuit.clone();
+        evaluator_circuit.labels.clear();
+        (evaluator_circuit, self.input_labels.clone(), decode_table)
     }
 
     fn evaluate_circuit(&mut self) -> Result<(), BackendError> {
