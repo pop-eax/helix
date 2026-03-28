@@ -255,6 +255,24 @@ pub fn lower_instruction(
              not supported in arithmetic BGW MPC"
                 .to_string(),
         )),
+        // Select: output = else_val + condition * (then_val - else_val)
+        // All operations are over the field, so this is exact and secret-compatible.
+        Instruction::Select { condition, then_val, else_val, output, .. } => {
+            ensure_input_node(program, *condition);
+            ensure_input_node(program, *then_val);
+            ensure_input_node(program, *else_val);
+            let cond = get_wire_node(program, *condition)?;
+            let tv = get_wire_node(program, *then_val)?;
+            let ev = get_wire_node(program, *else_val)?;
+            // diff = then_val - else_val
+            let diff = program.push_node(BgwOp::Sub { a: tv, b: ev });
+            // cond_diff = condition * diff
+            let cond_diff = program.push_node(BgwOp::Mul { a: cond, b: diff });
+            // result = else_val + cond_diff
+            let result = program.push_node(BgwOp::Add { a: ev, b: cond_diff });
+            program.set_wire_node(*output, result);
+            Ok(())
+        }
     }
 }
 

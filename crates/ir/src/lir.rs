@@ -108,6 +108,10 @@ pub enum GateType {
     LessThan,
     /// N-bit equality: output bit 0 = 1 iff input1 == input2
     Equal,
+
+    /// 3-input mux: inputs[0]=condition, inputs[1]=then_val, inputs[2]=else_val
+    /// output = condition ? then_val : else_val
+    Select,
 }
 
 // ============================================================================

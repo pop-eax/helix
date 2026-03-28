@@ -117,6 +117,12 @@ fn display_hir_instruction_kind(kind: &HirInstructionKind) -> String {
                 .collect();
             format!("phi([{}])", incoming_str.join(", "))
         }
+        HirInstructionKind::Select { condition, then_val, else_val } => {
+            format!("select({}, {}, {})",
+                display_hir_value(condition),
+                display_hir_value(then_val),
+                display_hir_value(else_val))
+        }
     }
 }
 

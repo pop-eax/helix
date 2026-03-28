@@ -189,6 +189,17 @@ impl Backend for ClearBackend {
                 state.set_wire(*output, WireValue::Clear(result), *vis);
                 Ok(())
             }
+
+            Instruction::Select { output_vis, condition, then_val, else_val, output } => {
+                let cond = self.get_clear_value(state, *condition)?;
+                let result = if cond != 0 {
+                    self.get_clear_value(state, *then_val)?
+                } else {
+                    self.get_clear_value(state, *else_val)?
+                };
+                state.set_wire(*output, WireValue::Clear(result), *output_vis);
+                Ok(())
+            }
         }
     }
 }

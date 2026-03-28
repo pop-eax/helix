@@ -87,6 +87,7 @@ fn display_gate_type(gate_type: &GateType, inputs: &[WireId]) -> String {
         }
         GateType::LessThan => format!("LT({})", inputs_list),
         GateType::Equal => format!("EQ({})", inputs_list),
+        GateType::Select => format!("SELECT({})", inputs_list),
     }
 }
 

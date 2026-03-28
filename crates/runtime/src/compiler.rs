@@ -175,6 +175,27 @@ fn gate_to_instruction(gate: &Gate, _circuit: &Circuit) -> Instruction {
                 output: gate.output,
             }
         }
+        GateType::Select => {
+            // Output is Secret if any of the three inputs is Secret.
+            let cond_vis = get_wire_visibility(gate.inputs[0], _circuit).unwrap_or(Visibility::Public);
+            let then_vis = get_wire_visibility(gate.inputs[1], _circuit).unwrap_or(Visibility::Public);
+            let else_vis = get_wire_visibility(gate.inputs[2], _circuit).unwrap_or(Visibility::Public);
+            let output_vis = if cond_vis == Visibility::Secret
+                || then_vis == Visibility::Secret
+                || else_vis == Visibility::Secret
+            {
+                Visibility::Secret
+            } else {
+                Visibility::Public
+            };
+            Instruction::Select {
+                output_vis,
+                condition: gate.inputs[0],
+                then_val: gate.inputs[1],
+                else_val: gate.inputs[2],
+                output: gate.output,
+            }
+        }
     }
 }
 

@@ -61,6 +61,17 @@ enum PendingOp {
         d_i: Fr,        // my share of δ = x − a
         e_i: Fr,        // my share of ε = y − b
     },
+    /// Select: same Beaver round as Mul for (cond * diff); then add else_val_i.
+    /// output = else_val + cond * (then_val - else_val)
+    Select {
+        output_wire: WireId,
+        else_val_i: Share<Fr>, // my share of else_val, added after the mul
+        a_i: Share<Fr>,
+        b_i: Share<Fr>,
+        c_i: Share<Fr>,
+        d_i: Fr,
+        e_i: Fr,
+    },
     /// Waiting for peers' output shares to reconstruct final values.
     Output { wires: Vec<WireId> },
 }
@@ -272,6 +283,43 @@ impl Backend for BgwNetBackend {
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
 
+            // Select: output = else_val + condition * (then_val - else_val)
+            // The subtraction is local; the multiply needs one Beaver round.
+            Instruction::Select { output_vis, condition, then_val, else_val, output } => {
+                let cond_i = self.my_share(*condition)?;
+                let tv_i = self.my_share(*then_val)?;
+                let ev_i = self.my_share(*else_val)?;
+
+                // diff_i = then_val_i - else_val_i  (local)
+                let diff_i = Share(tv_i.0 - ev_i.0);
+
+                let triple =
+                    generate_beaver_triple::<Fr, _>(self.threshold, self.n_parties, &mut self.rng)
+                        .map_err(|e| BackendError::BackendError(format!("beaver select: {e:?}")))?;
+
+                let a_i = triple.a.as_slice()[self.my_id];
+                let b_i = triple.b.as_slice()[self.my_id];
+                let c_i = triple.c.as_slice()[self.my_id];
+
+                let d_i = cond_i.0 - a_i.0;
+                let e_i = diff_i.0 - b_i.0;
+
+                let mut msg = fr_to_bytes(d_i);
+                msg.extend(fr_to_bytes(e_i));
+                self.broadcast(msg);
+
+                self.pending = Some(PendingOp::Select {
+                    output_wire: *output,
+                    else_val_i: ev_i,
+                    a_i,
+                    b_i,
+                    c_i,
+                    d_i,
+                    e_i,
+                });
+                state.set_wire(*output, WireValue::Secret, *output_vis);
+            }
+
             Instruction::LessThan { .. } | Instruction::Equal { .. } => {
                 return Err(BackendError::BackendError(
                     "comparison gates require the Yao backend (garbled circuits); \
@@ -322,6 +370,37 @@ impl Backend for BgwNetBackend {
                 // [z]_i = [c]_i + δ·[b]_i + ε·[a]_i + δ·ε
                 let z_i = c_i.0 + delta * b_i.0 + eta * a_i.0 + delta * eta;
                 self.my_shares.insert(output_wire, Share(z_i));
+            }
+
+            // ---- Select: same Beaver reconstruction as Mul, then add else_val ----
+            Some(PendingOp::Select { output_wire, else_val_i, a_i, b_i, c_i, d_i, e_i }) => {
+                let n = self.n_parties;
+                let mut d_shares = vec![Share(Fr::from(0u64)); n];
+                let mut e_shares = vec![Share(Fr::from(0u64)); n];
+
+                d_shares[self.my_id] = Share(d_i);
+                e_shares[self.my_id] = Share(e_i);
+
+                for (from, msg) in &messages {
+                    if msg.len() < 64 {
+                        return Err(BackendError::BackendError(
+                            "Select reply too short (expected 64 bytes)".into(),
+                        ));
+                    }
+                    d_shares[*from] = Share(fr_from_bytes(&msg[..32])?);
+                    e_shares[*from] = Share(fr_from_bytes(&msg[32..64])?);
+                }
+
+                let delta = reconstruct_secret(&d_shares)
+                    .map_err(|e| BackendError::BackendError(format!("select reconstruct δ: {e:?}")))?;
+                let eta = reconstruct_secret(&e_shares)
+                    .map_err(|e| BackendError::BackendError(format!("select reconstruct ε: {e:?}")))?;
+
+                // cond_diff_i = c_i + δ·b_i + ε·a_i + δ·ε
+                let cond_diff_i = c_i.0 + delta * b_i.0 + eta * a_i.0 + delta * eta;
+                // result_i = else_val_i + cond_diff_i
+                let result_i = else_val_i.0 + cond_diff_i;
+                self.my_shares.insert(output_wire, Share(result_i));
             }
 
             // ---- Output reconstruction: collect shares, reconstruct ----

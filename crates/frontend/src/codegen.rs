@@ -298,38 +298,84 @@ impl Codegen {
 
     fn convert_if_statement(&mut self, if_stmt: &IfStatement) -> CodegenResult<()> {
         let condition = self.convert_expression(&if_stmt.condition)?;
-        
-        // Create blocks for then, else, and merge
-        let then_block = self.builder.create_block();
-        let else_block = if if_stmt.else_block.is_some() {
-            Some(self.builder.create_block())
+
+        // Snapshot of variables visible before the branch.
+        let pre_snap: HashMap<String, HirValue> = self.variables.last()
+            .cloned()
+            .unwrap_or_default();
+
+        // ---- Compile then-branch in its own scope ----
+        self.enter_scope();
+        for stmt in &if_stmt.then_block.statements {
+            self.convert_statement(stmt)?;
+        }
+        // Collect only variables that existed before the branch (outer accumulators).
+        let then_vals: HashMap<String, HirValue> = self.variables.last()
+            .map(|s| {
+                s.iter()
+                    .filter(|(k, _)| pre_snap.contains_key(*k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.exit_scope();
+
+        // ---- Compile else-branch in its own scope (parent sees pre-branch values) ----
+        let else_vals: HashMap<String, HirValue> = if let Some(else_blk) = &if_stmt.else_block {
+            self.enter_scope();
+            for stmt in &else_blk.statements {
+                self.convert_statement(stmt)?;
+            }
+            let vals = self.variables.last()
+                .map(|s| {
+                    s.iter()
+                        .filter(|(k, _)| pre_snap.contains_key(*k))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.exit_scope();
+            vals
         } else {
-            None
+            HashMap::new()
         };
-        let merge_block = self.builder.create_block();
 
-        // Add branch terminator to current block
-        self.builder.set_terminator(HirTerminator::Branch {
-            condition,
-            then_block,
-            else_block: else_block.unwrap_or(merge_block),
-        });
+        // ---- Merge: emit Select for every variable touched in either branch ----
+        // Collect all names modified in at least one branch.
+        let mut modified: std::collections::BTreeSet<String> = Default::default();
+        for k in then_vals.keys() { modified.insert(k.clone()); }
+        for k in else_vals.keys() { modified.insert(k.clone()); }
 
-        // Convert then block
-        self.builder.set_current_block(then_block);
-        self.convert_block(&if_stmt.then_block, then_block)?;
-        // Add jump to merge
-        self.builder.set_terminator(HirTerminator::Jump { target: merge_block });
+        for name in modified {
+            let then_v = then_vals.get(&name)
+                .or_else(|| pre_snap.get(&name))
+                .cloned()
+                .unwrap();
+            let else_v = else_vals.get(&name)
+                .or_else(|| pre_snap.get(&name))
+                .cloned()
+                .unwrap();
 
-        // Convert else block if present
-        if let Some(else_blk) = else_block {
-            self.builder.set_current_block(else_blk);
-            self.convert_block(if_stmt.else_block.as_ref().unwrap(), else_blk)?;
-            self.builder.set_terminator(HirTerminator::Jump { target: merge_block });
+            // If both branches agree, no mux needed.
+            let merged = if then_v == else_v {
+                then_v
+            } else {
+                let id = self.builder.add_instruction(
+                    HirInstructionKind::Select {
+                        condition: condition.clone(),
+                        then_val: then_v,
+                        else_val: else_v,
+                    },
+                    HirType::Field { size: 64 },
+                );
+                HirValue::Instruction(id)
+            };
+
+            if let Some(scope) = self.variables.last_mut() {
+                scope.insert(name, merged);
+            }
         }
 
-        // Continue in merge block
-        self.builder.set_current_block(merge_block);
         Ok(())
     }
 

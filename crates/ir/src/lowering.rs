@@ -249,6 +249,12 @@ impl Lowerer {
             HirInstructionKind::Phi { .. } => {
                 return Err(LoweringError::UnsupportedOperation("Phi nodes not yet implemented".to_string()));
             }
+            HirInstructionKind::Select { condition, then_val, else_val } => {
+                let cond_wire = self.get_wire_for_value(condition)?;
+                let then_wire = self.get_wire_for_value(then_val)?;
+                let else_wire = self.get_wire_for_value(else_val)?;
+                self.builder.add_gate(GateType::Select, vec![cond_wire, then_wire, else_wire])
+            }
         };
 
         // Map instruction output to wire

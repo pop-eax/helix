@@ -866,6 +866,12 @@ impl Backend for YaoBackend {
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
                 Ok(())
             }
+
+            Instruction::Select { output_vis, condition, then_val, else_val, output } => {
+                self.build_mux(*condition, *then_val, *else_val, *output);
+                state.set_wire(*output, WireValue::Secret, *output_vis);
+                Ok(())
+            }
         }
     }
 }

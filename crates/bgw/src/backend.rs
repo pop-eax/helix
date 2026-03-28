@@ -175,6 +175,10 @@ impl Backend for BgwBackend {
                         .into(),
                 ));
             }
+            Instruction::Select { output_vis, output, .. } => {
+                // lower_instruction already expanded select into Sub+Mul+Add BGW ops.
+                state.set_wire(*output, WireValue::Secret, *output_vis);
+            }
         }
 
         Ok(())

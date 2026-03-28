@@ -163,6 +163,11 @@ pub enum HirInstructionKind {
     
     // Phi node for SSA (used in control flow merging)
     Phi { incoming: Vec<(BlockId, HirValue)> },
+
+    /// Circuit-level multiplexer: `condition ? then_val : else_val`.
+    /// Replaces phi nodes for if/else in circuit compilation — both branches
+    /// are always evaluated; the condition selects the live value at the merge.
+    Select { condition: HirValue, then_val: HirValue, else_val: HirValue },
 }
 
 // ============================================================================

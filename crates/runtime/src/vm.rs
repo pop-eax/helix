@@ -128,6 +128,16 @@ pub enum Instruction {
         output: WireId,
         field_size: u64,
     },
+
+    /// Multiplexer: output = condition ? then_val : else_val
+    /// Replaces phi nodes for if/else in circuit compilation.
+    Select {
+        output_vis: Visibility,
+        condition: WireId,
+        then_val: WireId,
+        else_val: WireId,
+        output: WireId,
+    },
 }
 
 /// Wire value in the VM
