@@ -215,6 +215,19 @@ pub trait Backend {
         Ok(vec![value.to_le_bytes().to_vec(); n_parties])
     }
 
+    /// Called once after all gate instructions have run, before output values
+    /// are collected.  Backends that need a network round for output
+    /// reconstruction (e.g. BGW) should queue outgoing share messages here;
+    /// the runner will deliver the replies via [`receive_replies`] and then
+    /// call [`get_output`].  The default is a no-op.
+    fn prepare_output_reconstruction(
+        &mut self,
+        _wires: &[WireId],
+        _state: &VMState,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     /// Called to deliver this party's share of `wire` (owned by another party,
     /// or by self after splitting via [`share_input`]).
     ///

@@ -2,11 +2,13 @@ pub mod backend;
 pub mod field;
 pub mod ir;
 pub mod lowering;
+pub mod net_backend;
 pub mod ops;
 pub mod shamir;
 pub mod types;
 
 pub use backend::{BgwBackend, BgwConfig};
+pub use net_backend::BgwNetBackend;
 pub use field::{field_to_u64_checked, u64_to_field, FieldConversionError};
 pub use ops::{
     add_shares, generate_beaver_triple, multiply_shares, multiply_shares_with_triple, scale_shares,

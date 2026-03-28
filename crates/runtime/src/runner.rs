@@ -167,7 +167,7 @@ impl<N: NetworkLayer, B: Backend> Runner<N, B> {
         }
 
         if self.pc >= self.instructions.len() {
-            return Ok(Step::Done(self.collect_outputs()?));
+            return Ok(Step::Done(self.collect_outputs().await?));
         }
 
         let instr = self.instructions[self.pc].clone();
@@ -265,9 +265,27 @@ impl<N: NetworkLayer, B: Backend> Runner<N, B> {
         Ok(())
     }
 
-    fn collect_outputs(&mut self) -> Result<Vec<(WireId, u64)>, RunnerError> {
+    async fn collect_outputs(&mut self) -> Result<Vec<(WireId, u64)>, RunnerError> {
+        // Give the backend a chance to run an output-reconstruction round
+        // (needed by BGW; no-op for Clear/Yao).
+        let wires: Vec<_> = self.program.circuit.outputs.clone();
+        self.backend.prepare_output_reconstruction(&wires, &self.state)?;
+
+        let outgoing = self.backend.take_outgoing();
+        if !outgoing.is_empty() {
+            let peers: Vec<usize> = outgoing.iter().map(|(id, _)| *id).collect();
+            for (to, msg) in outgoing {
+                self.network.send_to(to, msg).await?;
+            }
+            let mut replies = Vec::with_capacity(peers.len());
+            for from in peers {
+                replies.push((from, self.network.recv_from(from).await?));
+            }
+            self.backend.receive_replies(replies)?;
+        }
+
         let mut out = Vec::new();
-        for &wire in &self.program.circuit.outputs {
+        for &wire in &wires {
             out.push((wire, self.backend.get_output(wire, &self.state)?));
         }
         Ok(out)

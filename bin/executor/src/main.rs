@@ -70,6 +70,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             print_outputs(&outputs);
         }
 
+        // ---- Networked n-party BGW ----
+        "bgw-np" => {
+            let my_id = cli.my_id.ok_or("--my-id required for bgw-np")?;
+            let parties = cli.parties.ok_or("--parties required for bgw-np")?;
+            let threshold = cli.threshold.ok_or("--threshold required for bgw-np")?;
+            let addrs_str = cli.party_addrs.ok_or("--party-addrs required for bgw-np")?;
+            let my_value: u64 = cli.inputs.trim().parse()
+                .map_err(|_| format!("--inputs must be a single u64 for bgw-np, got {:?}", cli.inputs))?;
+            run_bgw_networked(&program, my_value, my_id, parties, threshold, &addrs_str).await?;
+        }
+
         // ---- Networked 2-party Yao ----
         "yao-2p" => {
             let my_id = cli.my_id.ok_or("--my-id required for yao-2p")?;
@@ -79,7 +90,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             run_yao_two_party(&program, my_value, cli.bits, my_id, &addrs_str).await?;
         }
 
-        other => return Err(format!("Unknown backend '{other}'. Use: clear, yao, bgw, yao-2p").into()),
+        other => return Err(format!("Unknown backend '{other}'. Use: clear, yao, bgw, yao-2p, bgw-np").into()),
     }
 
     Ok(())
@@ -151,6 +162,55 @@ fn print_outputs(outputs: &[(WireId, u64)]) {
     for (i, (_wire, value)) in outputs.iter().enumerate() {
         println!("output[{i}]: {value}");
     }
+}
+
+// ---- n-party BGW (networked) ----
+
+async fn run_bgw_networked(
+    program: &Program,
+    my_value: u64,
+    my_id: usize,
+    parties: usize,
+    threshold: usize,
+    addrs_str: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let addrs: Vec<&str> = addrs_str.split(',').collect();
+    if addrs.len() != parties {
+        return Err(format!(
+            "bgw-np requires exactly {parties} party addresses, got {}",
+            addrs.len()
+        )
+        .into());
+    }
+
+    let config = net::NetworkConfig::from_addrs(addrs.iter().copied(), my_id);
+    eprintln!("[party {my_id}] connecting to network…");
+    let network = net::connect(config).await?;
+    eprintln!("[party {my_id}] connected");
+
+    let backend = bgw::BgwNetBackend::new(my_id, parties, threshold)
+        .map_err(|e| format!("bgw backend: {e}"))?;
+
+    // Every party owns one input wire (circuit input[my_id]).
+    // Build InputAssignment list: own wire has a value, others are None.
+    let inputs: Vec<runtime::InputAssignment> = program
+        .circuit
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, inp)| runtime::InputAssignment {
+            wire: inp.wire,
+            owner: i,
+            value: if i == my_id { Some(my_value) } else { None },
+        })
+        .collect();
+
+    let mut runner = runtime::Runner::new(network, backend, program.clone(), &inputs)?;
+    let outputs = runner.run().await?;
+    for (i, (_wire, value)) in outputs.iter().enumerate() {
+        println!("output[{i}]: {value}");
+    }
+    Ok(())
 }
 
 // ---- 2-party Yao (networked) ----
