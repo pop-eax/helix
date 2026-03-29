@@ -380,6 +380,17 @@ impl YaoBackend {
         let final_lt = lt_prev.unwrap();
         self.circuit.add_gate(and_logic(), &[&final_lt, &final_lt], &out0); // copy
         self.circuit.add_output(&out0);
+
+        // Zero-fill bits 1..n: LT result is a 1-bit boolean.
+        // Uses `in1[0] AND NOT(in1[0]) = 0` to produce a constant-0 label for each bit.
+        let in1_b0 = self.wire_bit_name(in1, 0);
+        let not_in1_b0 = format!("lt_not_b0_{}_{}", in1.0, out.0);
+        self.circuit.add_gate(not_logic(), &[&in1_b0], &not_in1_b0);
+        for bit_idx in 1..n {
+            let out_i = self.wire_bit_name(out, bit_idx);
+            self.circuit.add_gate(and_logic(), &[&in1_b0, &not_in1_b0], &out_i);
+            self.circuit.add_output(&out_i);
+        }
     }
 
     /// N-bit equality check: output bit 0 = 1 iff `in1 == in2`.
@@ -423,6 +434,17 @@ impl YaoBackend {
         let final_acc = acc.unwrap();
         self.circuit.add_gate(and_logic(), &[&final_acc, &final_acc], &out0);
         self.circuit.add_output(&out0);
+
+        // Zero-fill bits 1..n: Equal result is a 1-bit boolean.
+        // Uses `in1[0] AND NOT(in1[0]) = 0` to produce a constant-0 label for each bit.
+        let in1_b0 = self.wire_bit_name(in1, 0);
+        let not_in1_b0 = format!("eq_not_b0_{}_{}", in1.0, out.0);
+        self.circuit.add_gate(not_logic(), &[&in1_b0], &not_in1_b0);
+        for bit_idx in 1..n {
+            let out_i = self.wire_bit_name(out, bit_idx);
+            self.circuit.add_gate(and_logic(), &[&in1_b0, &not_in1_b0], &out_i);
+            self.circuit.add_output(&out_i);
+        }
     }
 
     // Same as build_add but assumes wires are already initialized (I should remove it later and add checks to the regular add function)
