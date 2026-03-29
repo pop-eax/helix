@@ -57,6 +57,20 @@ pub fn fr_mul_l(a: Fr, b: Fr) -> Fr {
     dead
 }
 
+/// Logical field negation.
+#[logic(opaque)]
+#[trusted]
+pub fn fr_neg_l(a: Fr) -> Fr {
+    dead
+}
+
+/// Logical field subtraction (defined as add-neg).
+#[logic(opaque)]
+#[trusted]
+pub fn fr_sub_l(a: Fr, b: Fr) -> Fr {
+    dead
+}
+
 // ── Field axioms ────────────────────────────────────────────────────────────
 // Trusted functions whose *postconditions* become Why3 axioms.
 // They are never called at runtime; they purely state algebraic laws.
@@ -85,6 +99,11 @@ pub fn axiom_add_zero_r(a: Fr) {}
 #[trusted]
 #[ensures(fr_mul_l(fr_add_l(a, b), c) == fr_add_l(fr_mul_l(a, c), fr_mul_l(b, c)))]
 pub fn axiom_distrib_right(a: Fr, b: Fr, c: Fr) {}
+
+/// Subtraction is add-neg: a - b == a + (-b).
+#[trusted]
+#[ensures(fr_sub_l(a, b) == fr_add_l(a, fr_neg_l(b)))]
+pub fn axiom_sub_neg(a: Fr, b: Fr) {}
 
 // ── Runtime field wrappers ──────────────────────────────────────────────────
 // These are real Rust functions.  Their postconditions connect them to the
@@ -124,14 +143,16 @@ pub fn fr_mul(a: Fr, b: Fr) -> Fr {
     a * b
 }
 
-/// Runtime subtraction.
+/// Runtime subtraction, connected to the logical subtraction.
 #[trusted]
+#[ensures(result == fr_sub_l(a, b))]
 pub fn fr_sub(a: Fr, b: Fr) -> Fr {
     a - b
 }
 
-/// Runtime negation.
+/// Runtime negation, connected to the logical negation.
 #[trusted]
+#[ensures(result == fr_neg_l(a))]
 pub fn fr_neg(a: Fr) -> Fr {
     -a
 }
@@ -384,6 +405,169 @@ pub fn reconstruct_secret(shares: &[Fr]) -> Result<Fr, ShamirError> {
         i += 1;
     }
     Ok(secret)
+}
+
+// ── Share type and ops error ────────────────────────────────────────────────
+
+/// A single party's share value (y-coordinate; x is implicit from position).
+#[derive(Clone, Copy)]
+pub struct Share(pub Fr);
+
+/// Construct a Share; the postcondition exposes the inner field for the prover.
+/// Trusted so Creusot turns it into a universally-quantified Why3 axiom rather
+/// than trying to reduce the struct constructor directly.
+#[trusted]
+#[ensures(result.0 == v)]
+fn mk_share(v: Fr) -> Share {
+    Share(v)
+}
+
+/// Push a Share onto a Vec by value, returning the extended Vec.
+///
+/// Using a by-value API avoids the MutBorrow indirection (`_50`/`_49` record
+/// fields) that prevents alt-ergo from chaining through `view_Vec_Share_Global`
+/// to the postcondition.  After `out = vec_push_share_val(out, s)`, the
+/// postcondition `result@[v@.len()] == x` is directly about `out@` — a single
+/// equality step, no trigger required.
+#[trusted]
+#[ensures(result@.len() == v@.len() + 1)]
+#[ensures(result@[v@.len()] == x)]
+#[ensures(forall<j: Int> 0 <= j && j < v@.len() ==> result@[j] == v@[j])]
+fn vec_push_share_val(v: Vec<Share>, x: Share) -> Vec<Share> {
+    let mut v = v;
+    v.push(x);
+    v
+}
+
+
+/// Errors from share vector operations.
+#[derive(Clone, Copy)]
+pub enum OpsError {
+    LengthMismatch,
+}
+
+// ── Logical reconstruction spec ─────────────────────────────────────────────
+// Abstract model of Lagrange interpolation used only in logic/axioms.
+
+#[logic(opaque)]
+#[trusted]
+pub fn reconstruct_spec(shares: Seq<Share>) -> Fr {
+    dead
+}
+
+/// Additive homomorphism axiom: reconstruct(a ⊕ b) = reconstruct(a) + reconstruct(b).
+/// Trusted — algebraic proof of Lagrange linearity is out of scope for z3.
+#[trusted]
+#[requires(left.len() == right.len())]
+#[requires(forall<i: Int> 0 <= i && i < left.len() ==>
+           sum[i].0 == fr_add_l(left[i].0, right[i].0))]
+#[ensures(reconstruct_spec(sum) == fr_add_l(reconstruct_spec(left), reconstruct_spec(right)))]
+pub fn axiom_add_homomorphism(left: Seq<Share>, right: Seq<Share>, sum: Seq<Share>) {}
+
+/// Scalar homomorphism axiom: reconstruct(k · s) = k · reconstruct(s).
+#[trusted]
+#[requires(shares.len() == scaled.len())]
+#[requires(forall<i: Int> 0 <= i && i < shares.len() ==>
+           scaled[i].0 == fr_mul_l(shares[i].0, k))]
+#[ensures(reconstruct_spec(scaled) == fr_mul_l(reconstruct_spec(shares), k))]
+pub fn axiom_scale_homomorphism(shares: Seq<Share>, k: Fr, scaled: Seq<Share>) {}
+
+// ── 6. add_shares ────────────────────────────────────────────────────────────
+//
+// Properties:
+//   • Requires equal-length inputs.
+//   • Returns Ok(v) with v.len() == left.len().
+//   • Each output share equals the pointwise field sum.
+
+/// Pointwise-add two share vectors.
+#[requires(left@.len() == right@.len())]
+#[ensures(match result {
+    Ok(ref v) => v@.len() == left@.len()
+        && forall<i: Int> 0 <= i && i < left@.len() ==>
+               v@[i].0 == fr_add_l(left@[i].0, right@[i].0),
+    Err(_) => false,
+})]
+pub fn add_shares(left: &[Share], right: &[Share]) -> Result<Vec<Share>, OpsError> {
+    if left.len() != right.len() {
+        return Err(OpsError::LengthMismatch);
+    }
+    let mut out: Vec<Share> = Vec::new();
+    let n = left.len();
+    let mut i = 0usize;
+    #[invariant(out@.len() == i@)]
+    #[invariant(forall<j: Int> 0 <= j && j < out@.len() ==>
+                out@[j].0 == fr_add_l(left@[j].0, right@[j].0))]
+    while i < n {
+        let v = fr_add(left[i].0, right[i].0);
+        let s = mk_share(v);
+        let old_len = snapshot! { out@.len() };
+        out = vec_push_share_val(out, s);
+        proof_assert!(out@[*old_len] == s);
+        proof_assert!(out@[i@] == s);
+        i += 1;
+    }
+    Ok(out)
+}
+
+// ── 7. sub_shares ────────────────────────────────────────────────────────────
+
+/// Pointwise-subtract two share vectors.
+#[requires(left@.len() == right@.len())]
+#[ensures(match result {
+    Ok(ref v) => v@.len() == left@.len()
+        && forall<i: Int> 0 <= i && i < left@.len() ==>
+               v@[i].0 == fr_sub_l(left@[i].0, right@[i].0),
+    Err(_) => false,
+})]
+pub fn sub_shares(left: &[Share], right: &[Share]) -> Result<Vec<Share>, OpsError> {
+    if left.len() != right.len() {
+        return Err(OpsError::LengthMismatch);
+    }
+    let mut out: Vec<Share> = Vec::new();
+    let n = left.len();
+    let mut i = 0usize;
+    #[invariant(out@.len() == i@)]
+    #[invariant(forall<j: Int> 0 <= j && j < out@.len() ==>
+                out@[j].0 == fr_sub_l(left@[j].0, right@[j].0))]
+    while i < n {
+        let v = fr_sub(left[i].0, right[i].0);
+        let s = mk_share(v);
+        let old_len = snapshot! { out@.len() };
+        out = vec_push_share_val(out, s);
+        proof_assert!(out@[*old_len] == s);
+        proof_assert!(out@[i@] == s);
+        i += 1;
+    }
+    Ok(out)
+}
+
+// ── 8. scale_shares ──────────────────────────────────────────────────────────
+//
+// Properties:
+//   • Output length equals input length.
+//   • Each output share equals the input share multiplied by the scalar k.
+
+/// Multiply every share in the vector by a scalar k.
+#[ensures(result@.len() == shares@.len()
+    && forall<i: Int> 0 <= i && i < shares@.len() ==>
+           result@[i].0 == fr_mul_l(shares@[i].0, k))]
+pub fn scale_shares(shares: &[Share], k: Fr) -> Vec<Share> {
+    let mut out: Vec<Share> = Vec::new();
+    let n = shares.len();
+    let mut i = 0usize;
+    #[invariant(out@.len() == i@)]
+    #[invariant(forall<j: Int> 0 <= j && j < out@.len() ==>
+                out@[j].0 == fr_mul_l(shares@[j].0, k))]
+    while i < n {
+        let v = fr_mul(shares[i].0, k);
+        let s = mk_share(v);
+        let old_len = snapshot! { out@.len() };
+        out = vec_push_share_val(out, s);
+        proof_assert!(out@[*old_len] == s);
+        proof_assert!(out@[i@] == s);
+        i += 1;
+    }
+    out
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

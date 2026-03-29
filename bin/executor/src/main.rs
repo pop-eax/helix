@@ -5,38 +5,194 @@ use ir::lir::{PartyId, Program, WireId};
 use runtime::execute_program;
 use serde::{Deserialize, Serialize};
 
+// ── CLI ───────────────────────────────────────────────────────────────────────
+
 #[derive(Parser)]
 #[command(name = "runner", about = "Helix MPC circuit runner")]
 struct Cli {
+    /// Path to the compiled circuit (.ir file).
     circuit: PathBuf,
 
+    /// Comma-separated input values, e.g. "1,2,3".
+    /// For networked backends use '_' for inputs you don't own: "1,_,_".
+    /// Cannot be combined with --inputs-file.
+    #[arg(short, long, conflicts_with = "inputs_file")]
+    inputs: Option<String>,
+
+    /// Path to a TOML file describing inputs and backend configuration.
+    /// Cannot be combined with --inputs.
+    #[arg(long, conflicts_with = "inputs")]
+    inputs_file: Option<PathBuf>,
+
+    /// Backend to use.  Overrides the value in --inputs-file if both are given.
     #[arg(short, long)]
-    inputs: String,
+    backend: Option<String>,
 
-    #[arg(short, long, default_value = "clear")]
-    backend: String,
+    /// Bit-width for Yao backend (default 8).
+    /// Overrides the value in --inputs-file.
+    #[arg(long)]
+    bits: Option<usize>,
 
-    /// Bit-width for Yao backend (default 8)
-    #[arg(long, default_value_t = 8)]
-    bits: usize,
-
-    /// Number of parties for BGW
+    /// Number of parties for BGW.  Overrides --inputs-file.
     #[arg(long)]
     parties: Option<usize>,
 
-    /// Threshold for BGW
+    /// Threshold for BGW.  Overrides --inputs-file.
     #[arg(long)]
     threshold: Option<usize>,
 
-    /// This party's ID (0-based) — required for networked backends
+    /// This party's ID (0-based) — required for networked backends.
+    /// Overrides --inputs-file.
     #[arg(long)]
     my_id: Option<usize>,
 
-    /// Comma-separated list of party addresses (host:port), one per party
-    /// — required for networked backends (e.g. "127.0.0.1:7000,127.0.0.1:7001")
+    /// Comma-separated list of party addresses (host:port), one per party —
+    /// required for networked backends (e.g. "127.0.0.1:7000,127.0.0.1:7001").
+    /// Overrides --inputs-file.
     #[arg(long)]
     party_addrs: Option<String>,
 }
+
+// ── TOML config structs ───────────────────────────────────────────────────────
+
+/// Top-level structure of an inputs TOML file.
+///
+/// Example (single-process):
+/// ```toml
+/// [backend]
+/// type = "clear"
+///
+/// [inputs]
+/// values = [10, 20, 30]
+/// ```
+///
+/// Example (networked BGW, party 0 of 3):
+/// ```toml
+/// [backend]
+/// type  = "bgw-np"
+/// parties   = 3
+/// threshold = 2
+/// my_id     = 0
+///
+/// [network]
+/// party_addrs = ["127.0.0.1:7000", "127.0.0.1:7001", "127.0.0.1:7002"]
+///
+/// [inputs]
+/// spec = "10,_,_"
+/// ```
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct InputsFile {
+    backend: BackendSection,
+    network: NetworkSection,
+    inputs:  InputsSection,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct BackendSection {
+    /// "clear" | "yao" | "bgw" | "bgw-np" | "yao-2p"
+    #[serde(rename = "type")]
+    backend_type: Option<String>,
+    bits:      Option<usize>,
+    parties:   Option<usize>,
+    threshold: Option<usize>,
+    my_id:     Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct NetworkSection {
+    party_addrs: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct InputsSection {
+    /// Simple positional list of u64 values.  Use for single-process backends
+    /// or when all inputs belong to this party.
+    values: Option<Vec<u64>>,
+
+    /// Full input spec string — same syntax as the --inputs CLI flag.
+    /// Use '_' for inputs not owned by this party (networked backends).
+    /// If both `values` and `spec` are given, `spec` takes precedence.
+    spec: Option<String>,
+}
+
+impl InputsSection {
+    /// Return the effective input spec string, converting `values` to a
+    /// comma-separated string when only `values` is present.
+    fn resolve(&self) -> Result<String, Box<dyn std::error::Error>> {
+        if let Some(s) = &self.spec {
+            return Ok(s.clone());
+        }
+        if let Some(vs) = &self.values {
+            return Ok(vs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
+        }
+        Err("inputs file must contain either `inputs.values` or `inputs.spec`".into())
+    }
+}
+
+// ── Resolved config ───────────────────────────────────────────────────────────
+
+/// All settings after merging the TOML file with CLI overrides.
+/// CLI flags always win.
+struct Config {
+    inputs_str: String,
+    backend:    String,
+    bits:       usize,
+    parties:    Option<usize>,
+    threshold:  Option<usize>,
+    my_id:      Option<usize>,
+    party_addrs: Option<String>,
+}
+
+impl Config {
+    fn build(cli: &Cli) -> Result<Self, Box<dyn std::error::Error>> {
+        // Load TOML file if given.
+        let file: InputsFile = match &cli.inputs_file {
+            Some(path) => {
+                let raw = fs::read_to_string(path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                toml::from_str(&raw)
+                    .map_err(|e| format!("invalid TOML in {}: {e}", path.display()))?
+            }
+            None => InputsFile::default(),
+        };
+
+        // Resolve the input spec string.  CLI --inputs beats file.
+        let inputs_str = if let Some(s) = &cli.inputs {
+            s.clone()
+        } else {
+            file.inputs.resolve()?
+        };
+
+        // Merge backend fields: CLI overrides file.
+        let backend = cli
+            .backend
+            .clone()
+            .or(file.backend.backend_type)
+            .unwrap_or_else(|| "clear".to_string());
+
+        let bits = cli.bits.or(file.backend.bits).unwrap_or(8);
+
+        let parties = cli.parties.or(file.backend.parties);
+        let threshold = cli.threshold.or(file.backend.threshold);
+        let my_id = cli.my_id.or(file.backend.my_id);
+
+        // Party addresses: CLI --party-addrs (comma-separated string) beats
+        // TOML network.party_addrs (Vec<String>).
+        let party_addrs = cli.party_addrs.clone().or_else(|| {
+            file.network
+                .party_addrs
+                .map(|v| v.join(","))
+        });
+
+        Ok(Config { inputs_str, backend, bits, parties, threshold, my_id, party_addrs })
+    }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
@@ -48,55 +204,50 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    // Load compiled circuit
+    if cli.inputs.is_none() && cli.inputs_file.is_none() {
+        return Err("one of --inputs or --inputs-file is required".into());
+    }
+
     let bytes = fs::read(&cli.circuit)?;
     let program = Program::from_bytes(&bytes)
-        .map_err(|e| format!("Failed to deserialize circuit: {e}"))?;
+        .map_err(|e| format!("failed to deserialize circuit: {e}"))?;
 
-    match cli.backend.as_str() {
-        // ---- Single-process backends ----
+    let cfg = Config::build(&cli)?;
+
+    match cfg.backend.as_str() {
         "clear" => {
-            let outputs = run_single_process_clear(&program, &cli.inputs)?;
+            let outputs = run_single_process_clear(&program, &cfg.inputs_str)?;
             print_outputs(&outputs);
         }
         "yao" => {
-            let outputs = run_single_process_yao(&program, &cli.inputs, cli.bits)?;
+            let outputs = run_single_process_yao(&program, &cfg.inputs_str, cfg.bits)?;
             print_outputs(&outputs);
         }
         "bgw" => {
-            let parties = cli.parties.ok_or("--parties required for bgw")?;
-            let threshold = cli.threshold.ok_or("--threshold required for bgw")?;
-            let outputs = run_single_process_bgw(&program, &cli.inputs, parties, threshold)?;
+            let parties   = cfg.parties  .ok_or("--parties (or backend.parties in TOML) required for bgw")?;
+            let threshold = cfg.threshold.ok_or("--threshold (or backend.threshold in TOML) required for bgw")?;
+            let outputs = run_single_process_bgw(&program, &cfg.inputs_str, parties, threshold)?;
             print_outputs(&outputs);
         }
-
-        // ---- Networked n-party BGW ----
         "bgw-np" => {
-            let my_id = cli.my_id.ok_or("--my-id required for bgw-np")?;
-            let parties = cli.parties.ok_or("--parties required for bgw-np")?;
-            let threshold = cli.threshold.ok_or("--threshold required for bgw-np")?;
-            let addrs_str = cli.party_addrs.ok_or("--party-addrs required for bgw-np")?;
-            // Inputs are comma-separated: use '_' for inputs owned by other parties.
-            // Example: "-i 1,2,_,_" means this party owns the first two input wires.
-            let my_input_spec = cli.inputs.trim().to_string();
-            run_bgw_networked(&program, &my_input_spec, my_id, parties, threshold, &addrs_str).await?;
+            let my_id     = cfg.my_id    .ok_or("--my-id (or backend.my_id in TOML) required for bgw-np")?;
+            let parties   = cfg.parties  .ok_or("--parties (or backend.parties in TOML) required for bgw-np")?;
+            let threshold = cfg.threshold.ok_or("--threshold (or backend.threshold in TOML) required for bgw-np")?;
+            let addrs_str = cfg.party_addrs.ok_or("--party-addrs (or network.party_addrs in TOML) required for bgw-np")?;
+            run_bgw_networked(&program, &cfg.inputs_str, my_id, parties, threshold, &addrs_str).await?;
         }
-
-        // ---- Networked 2-party Yao ----
         "yao-2p" => {
-            let my_id = cli.my_id.ok_or("--my-id required for yao-2p")?;
-            let addrs_str = cli.party_addrs.ok_or("--party-addrs required for yao-2p")?;
-            let my_input_spec = cli.inputs.trim().to_string();
-            run_yao_two_party(&program, &my_input_spec, cli.bits, my_id, &addrs_str).await?;
+            let my_id     = cfg.my_id.ok_or("--my-id (or backend.my_id in TOML) required for yao-2p")?;
+            let addrs_str = cfg.party_addrs.ok_or("--party-addrs (or network.party_addrs in TOML) required for yao-2p")?;
+            run_yao_two_party(&program, &cfg.inputs_str, cfg.bits, my_id, &addrs_str).await?;
         }
-
-        other => return Err(format!("Unknown backend '{other}'. Use: clear, yao, bgw, yao-2p, bgw-np").into()),
+        other => return Err(format!("unknown backend '{other}'. Use: clear, yao, bgw, yao-2p, bgw-np").into()),
     }
 
     Ok(())
 }
 
-// ---- Single-process helpers ----
+// ── Single-process helpers ────────────────────────────────────────────────────
 
 fn run_single_process_clear(
     program: &Program,
@@ -137,12 +288,12 @@ fn parse_inputs(
         .split(',')
         .map(|s| s.trim().parse::<u64>())
         .collect::<Result<_, _>>()
-        .map_err(|e| format!("Invalid input: {e}"))?;
+        .map_err(|e| format!("invalid input: {e}"))?;
 
     let n_inputs = program.circuit.inputs.len();
     if input_values.len() != n_inputs {
         return Err(format!(
-            "Circuit expects {n_inputs} inputs, got {}",
+            "circuit expects {n_inputs} inputs, got {}",
             input_values.len()
         )
         .into());
@@ -164,14 +315,12 @@ fn print_outputs(outputs: &[(WireId, u64)]) {
     }
 }
 
-// ---- Shared input-spec parser ----
+// ── Shared input-spec parser (networked backends) ─────────────────────────────
 
 /// Parse a comma-separated input spec like `"1,2,_,_"` into `InputAssignment`s.
 ///
 /// `_` means "I don't own this wire".  Ownership falls back to
 /// `floor(i * n_parties / n_inputs)` when no circuit party annotation is present.
-/// Returns an error if a wire owned by another party has a value, or a wire owned
-/// by this party is marked `_`.
 fn parse_input_spec(
     program: &Program,
     spec: &str,
@@ -201,7 +350,7 @@ fn parse_input_spec(
         .iter()
         .enumerate()
         .map(|(i, inp)| runtime::InputAssignment {
-            wire: inp.wire,
+            wire:  inp.wire,
             owner: owner_of(i, inp),
             value: None,
         })
@@ -242,7 +391,7 @@ fn parse_input_spec(
     Ok(assignments)
 }
 
-// ---- n-party BGW (networked) ----
+// ── n-party BGW (networked) ───────────────────────────────────────────────────
 
 async fn run_bgw_networked(
     program: &Program,
@@ -266,10 +415,7 @@ async fn run_bgw_networked(
     let mut network = net::connect(config).await?;
     eprintln!("[party {my_id}] connected");
 
-    // Offline phase — trusted dealer (party 0) generates all Beaver triples
-    // with OsRng, Shamir-shares each one, and sends each party only their slice.
-    // No party other than the dealer ever sees the full triple.
-    let n_muls = bgw::count_multiplications(&program);
+    let n_muls = bgw::count_multiplications(program);
     let my_triple_blob: Vec<u8> = if my_id == 0 {
         let blobs = bgw::dealer_generate_triple_blobs(n_muls, parties, threshold);
         for (j, blob) in blobs.iter().enumerate() {
@@ -298,22 +444,15 @@ async fn run_bgw_networked(
     Ok(())
 }
 
-// ---- 2-party Yao (networked) ----
+// ── 2-party Yao (networked) ───────────────────────────────────────────────────
 
 /// Message sent from garbler (party 0) to evaluator (party 1).
-///
-/// The evaluator's active input labels are NOT included here — they are
-/// delivered privately via OT (see `ot_ciphertexts`).
 #[derive(Serialize, Deserialize)]
 struct GarblerMsg {
-    garbled_circuit: garbledc::circuit::Circuit,
-    /// Garbler's own active input labels (one per bit wire).
+    garbled_circuit:      garbledc::circuit::Circuit,
     garbler_active_labels: HashMap<String, u128>,
-    /// One decode bit (lsb of label₀) per output bit wire.
-    output_label_pairs: HashMap<String, u8>,
-    /// OT round 3: encrypted label pairs for every evaluator input bit.
-    /// Index order matches the evaluator's OT A-point messages.
-    ot_ciphertexts: Vec<(u128, u128)>,
+    output_label_pairs:   HashMap<String, u8>,
+    ot_ciphertexts:       Vec<(u128, u128)>,
 }
 
 async fn run_yao_two_party(
@@ -349,7 +488,6 @@ async fn run_yao_two_party(
     }
 }
 
-/// Party 0 — builds and garbles the circuit, runs OT for party 1's inputs.
 async fn garbler_run(
     program: &Program,
     inputs: &[runtime::InputAssignment],
@@ -359,7 +497,6 @@ async fn garbler_run(
     use runtime::{compile_to_vm_instructions, vm::{VMState, Backend}};
     use garbledc::ot::OTSender;
 
-    // Build circuit structure by running all gate instructions.
     let mut backend = garbledc::backend::YaoBackend::new(bits);
     let instructions = compile_to_vm_instructions(&program.circuit);
     let n_wires = program
@@ -379,7 +516,6 @@ async fn garbler_run(
         backend.execute_instruction(instr, &mut state)?;
     }
 
-    // Separate garbler-owned (party 0) and evaluator-owned (party 1) wires.
     let garbler_inputs: Vec<(WireId, u64)> = inputs
         .iter()
         .filter(|a| a.owner == 0)
@@ -391,13 +527,10 @@ async fn garbler_run(
         .map(|a| a.wire)
         .collect();
 
-    // Set all garbler-owned input labels.
     for &(wire, value) in &garbler_inputs {
         backend.set_input(wire, value, runtime::Visibility::Secret, &mut state)?;
     }
 
-    // Register all evaluator wires and collect OT messages.
-    // Flat order: [bits of wire₀, bits of wire₁, …] LSB-first, matching evaluator.
     let mut ot_messages: Vec<(u128, u128)> = Vec::new();
     for &wire in &eval_wires {
         backend.register_evaluator_wire(wire);
@@ -409,7 +542,6 @@ async fn garbler_run(
         }
     }
 
-    // ---- OT for all evaluator input bits ----
     let n_ot = ot_messages.len();
     let (ot_sender, a_bytes) = OTSender::setup(n_ot);
     network.send(1, &a_bytes).await?;
@@ -420,7 +552,6 @@ async fn garbler_run(
 
     let ot_ciphertexts = ot_sender.respond(&b_bytes, &ot_messages);
 
-    // Garble and send circuit bundle.
     let (garbled_circuit, garbler_active_labels, output_label_pairs) =
         backend.finalize_garbler();
 
@@ -437,7 +568,6 @@ async fn garbler_run(
         .await?;
     eprintln!("[garbler] sent garbled circuit bundle");
 
-    // Receive all decoded output values from the evaluator.
     let results: Vec<u64> = network.recv(1).await?;
     for (i, v) in results.iter().enumerate() {
         println!("output[{i}]: {v}");
@@ -445,7 +575,6 @@ async fn garbler_run(
     Ok(())
 }
 
-/// Party 1 — participates in OT to obtain its input labels, then evaluates.
 async fn evaluator_run(
     program: &Program,
     inputs: &[runtime::InputAssignment],
@@ -454,21 +583,17 @@ async fn evaluator_run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use garbledc::ot::OTReceiver;
 
-    // Collect evaluator-owned wires and values in program-input order.
-    // This order must match the garbler's OT message ordering.
     let eval_inputs: Vec<(WireId, u64)> = inputs
         .iter()
         .filter(|a| a.owner == 1)
         .map(|a| (a.wire, a.value.unwrap()))
         .collect();
 
-    // Choice bits: all bits of all evaluator wires, LSB-first per wire.
     let choices: Vec<bool> = eval_inputs
         .iter()
         .flat_map(|&(_, v)| (0..bits).map(move |i| (v >> i) & 1 == 1))
         .collect();
 
-    // ---- OT for all evaluator input bits ----
     let a_bytes: Vec<[u8; 32]> = network.recv(0).await?;
     eprintln!("[evaluator] OT round 1 received ({} A-points)", a_bytes.len());
 
@@ -476,14 +601,11 @@ async fn evaluator_run(
     network.send(0, &b_bytes).await?;
     eprintln!("[evaluator] OT round 2 sent");
 
-    // Receive garbled circuit bundle (includes OT ciphertexts for our labels).
     let msg: GarblerMsg = network.recv(0).await?;
     eprintln!("[evaluator] received garbled circuit ({} gates)", msg.garbled_circuit.gates.len());
 
-    // Decrypt our input labels.
     let my_labels: Vec<u128> = ot_receiver.finish(&msg.ot_ciphertexts);
 
-    // Reconstruct evaluator's active label map across all owned wires.
     let mut eval_active: HashMap<String, u128> = HashMap::new();
     for (wire_idx, &(wire, _)) in eval_inputs.iter().enumerate() {
         for bit_idx in 0..bits {
@@ -492,12 +614,10 @@ async fn evaluator_run(
         }
     }
 
-    // Merge with garbler's active labels and evaluate.
     let mut active_labels = msg.garbler_active_labels;
     active_labels.extend(eval_active);
     let results = msg.garbled_circuit.evaluate(active_labels);
 
-    // Decode all output wires bit by bit.
     let mut output_values: Vec<u64> = Vec::new();
     for &out_wire in &program.circuit.outputs {
         let mut value = 0u64;
@@ -513,7 +633,6 @@ async fn evaluator_run(
         output_values.push(value);
     }
 
-    // Send all decoded values to garbler and print locally.
     network.send(0, &output_values).await?;
     for (i, v) in output_values.iter().enumerate() {
         println!("output[{i}]: {v}");
