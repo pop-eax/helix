@@ -1,0 +1,8 @@
+-R theories HelixDSL
+
+theories/Types.v
+theories/Values.v
+theories/Syntax.v
+theories/Typing.v
+theories/Semantics.v
+theories/Soundness.v

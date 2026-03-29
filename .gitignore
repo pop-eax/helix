@@ -2,3 +2,16 @@
 /verify/shamir-verify/target
 /verify/shamir-verify/.why3find
 /verify/shamir-verify/verif
+
+# Rocq/Coq build artifacts
+/verify/dsl-verify/.Makefile.coq.d
+/verify/dsl-verify/Makefile.coq
+/verify/dsl-verify/Makefile.coq.conf
+/verify/dsl-verify/theories/*.vo
+/verify/dsl-verify/theories/*.vok
+/verify/dsl-verify/theories/*.vos
+/verify/dsl-verify/theories/*.glob
+/verify/dsl-verify/theories/*.aux
+/verify/dsl-verify/theories/.*.aux
+/verify/dsl-verify/theories/.coq-native/
+/verify/dsl-verify/.coq-native/
