@@ -305,11 +305,15 @@ impl Codegen {
             .unwrap_or_default();
 
         // ---- Compile then-branch in its own scope ----
+        // Bump inline_depth so that any `return` inside the branch is captured
+        // into self.inline_return rather than immediately emitting a terminator.
         self.enter_scope();
+        self.inline_depth += 1;
         for stmt in &if_stmt.then_block.statements {
             self.convert_statement(stmt)?;
         }
-        // Collect only variables that existed before the branch (outer accumulators).
+        self.inline_depth -= 1;
+        let then_return = self.inline_return.take();
         let then_vals: HashMap<String, HirValue> = self.variables.last()
             .map(|s| {
                 s.iter()
@@ -320,7 +324,8 @@ impl Codegen {
             .unwrap_or_default();
         self.exit_scope();
 
-        // ---- Compile else-branch in its own scope (parent sees pre-branch values) ----
+        // ---- Compile else-branch in its own scope ----
+        self.inline_depth += 1;
         let else_vals: HashMap<String, HirValue> = if let Some(else_blk) = &if_stmt.else_block {
             self.enter_scope();
             for stmt in &else_blk.statements {
@@ -339,9 +344,44 @@ impl Codegen {
         } else {
             HashMap::new()
         };
+        self.inline_depth -= 1;
+        let else_return = self.inline_return.take();
+
+        // ---- Merge return values when both (or one) branch returns ----
+        // If both branches contain a `return`, synthesise a Select so the whole
+        // if-else produces a single value, then propagate it (either as a
+        // terminator or as an inlined return value, depending on context).
+        let branch_return: Option<HirValue> = match (then_return, else_return) {
+            (Some(tv), Some(ev)) => {
+                let merged = if tv == ev {
+                    tv
+                } else {
+                    let id = self.builder.add_instruction(
+                        HirInstructionKind::Select {
+                            condition: condition.clone(),
+                            then_val: tv,
+                            else_val: ev,
+                        },
+                        HirType::Bool,
+                    );
+                    HirValue::Instruction(id)
+                };
+                Some(merged)
+            }
+            (Some(tv), None) => Some(tv),
+            (None, Some(ev)) => Some(ev),
+            (None, None) => None,
+        };
+
+        if let Some(ret_val) = branch_return {
+            if self.inline_depth > 0 {
+                self.inline_return = Some(ret_val);
+            } else {
+                self.builder.set_terminator(HirTerminator::Return { value: ret_val });
+            }
+        }
 
         // ---- Merge: emit Select for every variable touched in either branch ----
-        // Collect all names modified in at least one branch.
         let mut modified: std::collections::BTreeSet<String> = Default::default();
         for k in then_vals.keys() { modified.insert(k.clone()); }
         for k in else_vals.keys() { modified.insert(k.clone()); }
@@ -356,7 +396,6 @@ impl Codegen {
                 .cloned()
                 .unwrap();
 
-            // If both branches agree, no mux needed.
             let merged = if then_v == else_v {
                 then_v
             } else {
