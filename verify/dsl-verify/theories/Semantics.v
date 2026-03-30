@@ -146,50 +146,51 @@ Definition eval_unop (op : unop) (v : value) : option value :=
 (** Four mutually inductive relations cover expressions, single
     statements, statement lists, and for-loop unrolling. *)
 
-Inductive eval_expr (Φ : func_val_env) (ρ : val_env)
-    : expr -> value -> Prop :=
+Inductive eval_expr (Φ : func_val_env)
+    : val_env -> expr -> value -> Prop :=
 
-  | EvalVar : forall x v,
+  | EvalVar : forall ρ x v,
       val_lookup ρ x = Some v ->
       eval_expr Φ ρ (EVar x) v
 
-  | EvalConst : forall v,
+  | EvalConst : forall ρ v,
       eval_expr Φ ρ (EConst v) v
 
-  | EvalBinop : forall op e1 e2 v1 v2 v,
+  | EvalBinop : forall ρ op e1 e2 v1 v2 v,
       eval_expr Φ ρ e1 v1 ->
       eval_expr Φ ρ e2 v2 ->
       eval_binop op v1 v2 = Some v ->
       eval_expr Φ ρ (EBinop op e1 e2) v
 
-  | EvalUnop : forall op e v1 v,
+  | EvalUnop : forall ρ op e v1 v,
       eval_expr Φ ρ e v1 ->
       eval_unop op v1 = Some v ->
       eval_expr Φ ρ (EUnop op e) v
 
-  | EvalSelectTrue : forall e_cond e_then e_else v,
+  | EvalSelectTrue : forall ρ e_cond e_then e_else v,
       eval_expr Φ ρ e_cond (VBool true) ->
       eval_expr Φ ρ e_then v ->
       eval_expr Φ ρ (ESelect e_cond e_then e_else) v
 
-  | EvalSelectFalse : forall e_cond e_then e_else v,
+  | EvalSelectFalse : forall ρ e_cond e_then e_else v,
       eval_expr Φ ρ e_cond (VBool false) ->
       eval_expr Φ ρ e_else v ->
       eval_expr Φ ρ (ESelect e_cond e_then e_else) v
 
-  | EvalIndex : forall e_arr i vs v,
-      eval_expr Φ ρ e_arr (VArray vs) ->
+  | EvalIndex : forall ρ e_arr (τ : ty) i (vs : list value) v,
+      eval_expr Φ ρ e_arr (VArray τ vs) ->
       nth_error vs i = Some v ->
       eval_expr Φ ρ (EIndex e_arr i) v
 
-  | EvalField : forall e_struct fname fields v,
-      eval_expr Φ ρ e_struct (VStruct fields) ->
+  | EvalField : forall ρ e_struct (sname fname : string)
+                         (fields : list (string * value)) v,
+      eval_expr Φ ρ e_struct (VStruct sname fields) ->
       List.find (fun p => String.eqb (fst p) fname) fields = Some (fname, v) ->
       eval_expr Φ ρ (EField e_struct fname) v
 
-  | EvalCall : forall f args fv arg_vals v,
+  | EvalCall : forall ρ f args fv arg_vals v,
       func_val_lookup Φ f = Some fv ->
-      length (fv_params fv) = length args ->
+      List.length (fv_params fv) = List.length args ->
       Forall2 (eval_expr Φ ρ) args arg_vals ->
       eval_stmts Φ (List.combine (fv_params fv) arg_vals) (fv_body fv)
                  (ReturnVal v) ->
@@ -243,32 +244,32 @@ with eval_for (Φ : func_val_env)
     : val_env -> string -> nat -> nat -> list stmt -> eval_result -> Prop :=
 
   | EvalForDone : forall ρ x lo hi body,
-      lo >= hi ->
+      (lo >= hi)%nat ->
       eval_for Φ ρ x lo hi body (Continue ρ)
 
   | EvalForStep : forall ρ ρ' x lo hi body r,
-      lo < hi ->
-      eval_stmts Φ (val_update ρ x (VField 64 (Z.of_nat lo))) body
+      (lo < hi)%nat ->
+      eval_stmts Φ (val_update ρ x (VField 64%nat (Z.of_nat lo))) body
                  (Continue ρ') ->
       eval_for Φ ρ' x (S lo) hi body r ->
       eval_for Φ ρ  x lo     hi body r
 
   | EvalForReturn : forall ρ x lo hi body v,
-      lo < hi ->
-      eval_stmts Φ (val_update ρ x (VField 64 (Z.of_nat lo))) body
+      (lo < hi)%nat ->
+      eval_stmts Φ (val_update ρ x (VField 64%nat (Z.of_nat lo))) body
                  (ReturnVal v) ->
       eval_for Φ ρ x lo hi body (ReturnVal v).
 
 (* ------------------------------------------------------------------ *)
 (** ** Scheme for mutual induction *)
 
-Scheme eval_expr_ind  := Induction for eval_expr  Sort Prop
-  with eval_stmt_ind  := Induction for eval_stmt  Sort Prop
-  with eval_stmts_ind := Induction for eval_stmts Sort Prop
-  with eval_for_ind   := Induction for eval_for   Sort Prop.
+Scheme eval_expr_mut_ind  := Induction for eval_expr  Sort Prop
+  with eval_stmt_mut_ind  := Induction for eval_stmt  Sort Prop
+  with eval_stmts_mut_ind := Induction for eval_stmts Sort Prop
+  with eval_for_mut_ind   := Induction for eval_for   Sort Prop.
 
 Combined Scheme eval_mutual_ind from
-  eval_expr_ind, eval_stmt_ind, eval_stmts_ind, eval_for_ind.
+  eval_expr_mut_ind, eval_stmt_mut_ind, eval_stmts_mut_ind, eval_for_mut_ind.
 
 (* ------------------------------------------------------------------ *)
 (** ** Evaluation of a complete program *)

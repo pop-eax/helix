@@ -24,10 +24,10 @@ Inductive value : Type :=
         Well-formed values satisfy [0 <= z < 2^n]. *)
   | VBool   : bool -> value
     (** A boolean value. *)
-  | VArray  : list value -> value
-    (** A fixed-size array.  Well-formed arrays are homogeneous. *)
-  | VStruct : list (string * value) -> value.
-    (** A struct: an ordered list of (field_name, value) pairs. *)
+  | VArray  : ty -> list value -> value
+    (** A fixed-size array tagged with its element type. *)
+  | VStruct : string -> list (string * value) -> value.
+    (** A struct tagged with its nominal type name and field values. *)
 
 (* ------------------------------------------------------------------ *)
 (** ** Field arithmetic *)
@@ -50,7 +50,9 @@ Qed.
 (** ** Well-formed values
 
     [wf_value v τ] asserts that the value [v] has type [τ] and that
-    all sub-values are within their valid ranges. *)
+    all sub-values are within their valid ranges.  Arrays and structs
+    carry their type identity directly in the runtime value, so empty
+    arrays and nominal structs remain unambiguous. *)
 
 Inductive wf_value : value -> ty -> Prop :=
 
@@ -61,22 +63,23 @@ Inductive wf_value : value -> ty -> Prop :=
   | WfBool : forall b,
       wf_value (VBool b) TBoolTy
 
-  | WfArray : forall vs τ n,
+  | WfArray : forall τ vs n,
       List.length vs = n ->
       Forall (fun v => wf_value v τ) vs ->
-      wf_value (VArray vs) (TArray τ n)
+      wf_value (VArray τ vs) (TArray τ n)
 
-  | WfStruct : forall fields sname,
-      (** Struct values are well-formed for any struct type with the
-          same name; field-level consistency is tracked by the struct
-          definition environment (out of scope here). *)
-      wf_value (VStruct fields) (TStruct sname).
+  | WfStruct : forall sname fields,
+      (** Field-level consistency is still tracked by the struct
+          definition environment (out of scope here); the runtime value
+          only stores the nominal struct tag. *)
+      wf_value (VStruct sname fields) (TStruct sname).
 
 (* ------------------------------------------------------------------ *)
 (** ** Helpers *)
 
 (** Extract the type of a value (defined for base values only;
-    arrays and structs require external context for completeness). *)
+    arrays and structs are tagged directly, but this helper stays
+    focused on base values for now). *)
 Definition typeof_base_val (v : value) : option ty :=
   match v with
   | VField n _ => Some (TField n)

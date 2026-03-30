@@ -149,7 +149,7 @@ Inductive has_type_expr
 
   | TyCall : forall f args τ_params τ_ret,
       func_ty_lookup Φ f = Some (τ_params, τ_ret) ->
-      length args = length τ_params ->
+      List.length args = List.length τ_params ->
       Forall2 (fun e τ => has_type_expr Γ Φ Σ e τ) args τ_params ->
       has_type_expr Γ Φ Σ (ECall f args) τ_ret.
 
