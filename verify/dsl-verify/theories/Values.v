@@ -49,30 +49,37 @@ Qed.
 (* ------------------------------------------------------------------ *)
 (** ** Well-formed values
 
-    [wf_value v τ] asserts that the value [v] has type [τ] and that
-    all sub-values are within their valid ranges.  Arrays and structs
-    carry their type identity directly in the runtime value, so empty
-    arrays and nominal structs remain unambiguous. *)
+    [wf_value Σ v τ] asserts that the value [v] has type [τ] and that
+    all sub-values are within their valid ranges and agree with the
+    struct definitions from [Σ]. *)
 
-Inductive wf_value : value -> ty -> Prop :=
+Inductive wf_value (Σ : struct_env) : value -> ty -> Prop :=
 
   | WfField : forall n z,
       0 <= z < field_mod n ->
-      wf_value (VField n z) (TField n)
+      wf_value Σ (VField n z) (TField n)
 
   | WfBool : forall b,
-      wf_value (VBool b) TBoolTy
+      wf_value Σ (VBool b) TBoolTy
 
   | WfArray : forall τ vs n,
       List.length vs = n ->
-      Forall (fun v => wf_value v τ) vs ->
-      wf_value (VArray τ vs) (TArray τ n)
+      Forall (fun v => wf_value Σ v τ) vs ->
+      wf_value Σ (VArray τ vs) (TArray τ n)
 
-  | WfStruct : forall sname fields,
-      (** Field-level consistency is still tracked by the struct
-          definition environment (out of scope here); the runtime value
-          only stores the nominal struct tag. *)
-      wf_value (VStruct sname fields) (TStruct sname).
+  | WfStruct : forall sname fields field_defs,
+      struct_lookup Σ sname = Some field_defs ->
+      wf_struct_fields Σ fields field_defs ->
+      wf_value Σ (VStruct sname fields) (TStruct sname)
+
+with wf_struct_fields (Σ : struct_env)
+    : list (string * value) -> list (string * ty) -> Prop :=
+  | WfStructFieldsNil :
+      wf_struct_fields Σ [] []
+  | WfStructFieldsCons : forall fname v fields τ field_defs,
+      wf_value Σ v τ ->
+      wf_struct_fields Σ fields field_defs ->
+      wf_struct_fields Σ ((fname, v) :: fields) ((fname, τ) :: field_defs).
 
 (* ------------------------------------------------------------------ *)
 (** ** Helpers *)

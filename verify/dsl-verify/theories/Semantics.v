@@ -143,8 +143,8 @@ Definition eval_unop (op : unop) (v : value) : option value :=
 (* ------------------------------------------------------------------ *)
 (** ** Big-step evaluation relations *)
 
-(** Four mutually inductive relations cover expressions, single
-    statements, statement lists, and for-loop unrolling. *)
+(** Five mutually inductive relations cover expressions, expression
+    lists, single statements, statement lists, and for-loop unrolling. *)
 
 Inductive eval_expr (Φ : func_val_env)
     : val_env -> expr -> value -> Prop :=
@@ -191,10 +191,21 @@ Inductive eval_expr (Φ : func_val_env)
   | EvalCall : forall ρ f args fv arg_vals v,
       func_val_lookup Φ f = Some fv ->
       List.length (fv_params fv) = List.length args ->
-      Forall2 (eval_expr Φ ρ) args arg_vals ->
+      eval_exprs Φ ρ args arg_vals ->
       eval_stmts Φ (List.combine (fv_params fv) arg_vals) (fv_body fv)
                  (ReturnVal v) ->
       eval_expr Φ ρ (ECall f args) v
+
+with eval_exprs (Φ : func_val_env)
+    : val_env -> list expr -> list value -> Prop :=
+
+  | EvalExprsNil : forall ρ,
+      eval_exprs Φ ρ [] []
+
+  | EvalExprsCons : forall ρ e es v vs,
+      eval_expr Φ ρ e v ->
+      eval_exprs Φ ρ es vs ->
+      eval_exprs Φ ρ (e :: es) (v :: vs)
 
 with eval_stmt (Φ : func_val_env)
     : val_env -> stmt -> eval_result -> Prop :=
@@ -249,14 +260,14 @@ with eval_for (Φ : func_val_env)
 
   | EvalForStep : forall ρ ρ' x lo hi body r,
       (lo < hi)%nat ->
-      eval_stmts Φ (val_update ρ x (VField 64%nat (Z.of_nat lo))) body
+      eval_stmts Φ (val_update ρ x (VField 64%nat (to_field 64%nat (Z.of_nat lo)))) body
                  (Continue ρ') ->
       eval_for Φ ρ' x (S lo) hi body r ->
       eval_for Φ ρ  x lo     hi body r
 
   | EvalForReturn : forall ρ x lo hi body v,
       (lo < hi)%nat ->
-      eval_stmts Φ (val_update ρ x (VField 64%nat (Z.of_nat lo))) body
+      eval_stmts Φ (val_update ρ x (VField 64%nat (to_field 64%nat (Z.of_nat lo)))) body
                  (ReturnVal v) ->
       eval_for Φ ρ x lo hi body (ReturnVal v).
 
@@ -264,12 +275,13 @@ with eval_for (Φ : func_val_env)
 (** ** Scheme for mutual induction *)
 
 Scheme eval_expr_mut_ind  := Induction for eval_expr  Sort Prop
+  with eval_exprs_mut_ind := Induction for eval_exprs Sort Prop
   with eval_stmt_mut_ind  := Induction for eval_stmt  Sort Prop
   with eval_stmts_mut_ind := Induction for eval_stmts Sort Prop
   with eval_for_mut_ind   := Induction for eval_for   Sort Prop.
 
 Combined Scheme eval_mutual_ind from
-  eval_expr_mut_ind, eval_stmt_mut_ind, eval_stmts_mut_ind, eval_for_mut_ind.
+  eval_expr_mut_ind, eval_exprs_mut_ind, eval_stmt_mut_ind, eval_stmts_mut_ind, eval_for_mut_ind.
 
 (* ------------------------------------------------------------------ *)
 (** ** Evaluation of a complete program *)

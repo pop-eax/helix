@@ -1,5 +1,7 @@
 From Stdlib Require Import Arith.
 From Stdlib Require Import Strings.String.
+From Stdlib Require Import Lists.List.
+Import ListNotations.
 
 (** * Helix DSL — Type System
 
@@ -41,6 +43,27 @@ Inductive ty : Type :=
 (** Convenience shorthands matching the surface-syntax keywords. *)
 Definition TField (n : field_size) : ty := TBase (BTField n).
 Definition TBoolTy                 : ty := TBase BTBool.
+
+(* ------------------------------------------------------------------ *)
+(** ** Struct environments *)
+
+(** Struct definition environment: maps a struct name to its ordered
+    list of (field_name, field_type) pairs. *)
+Definition struct_env := list (string * list (string * ty)).
+
+Fixpoint struct_lookup (Σ : struct_env) (name : string)
+    : option (list (string * ty)) :=
+  match Σ with
+  | []            => None
+  | (s, fs) :: Σ' => if String.eqb name s then Some fs else struct_lookup Σ' name
+  end.
+
+Fixpoint field_lookup (fields : list (string * ty)) (fname : string)
+    : option ty :=
+  match fields with
+  | []            => None
+  | (f, τ) :: rest => if String.eqb fname f then Some τ else field_lookup rest fname
+  end.
 
 (* ------------------------------------------------------------------ *)
 (** ** Visibility qualifiers *)

@@ -33,6 +33,9 @@ Fixpoint ty_lookup (Γ : ty_env) (x : string) : option ty :=
   | (y, τ) :: Γ' => if String.eqb x y then Some τ else ty_lookup Γ' x
   end.
 
+Definition fresh_in_ty_env (Γ : ty_env) (x : string) : Prop :=
+  ty_lookup Γ x = None.
+
 (** Function type environment. *)
 Definition func_ty_env := list (string * (list ty * ty)).
 
@@ -40,24 +43,6 @@ Fixpoint func_ty_lookup (Φ : func_ty_env) (f : string) : option (list ty * ty) 
   match Φ with
   | []              => None
   | (g, sig) :: Φ' => if String.eqb f g then Some sig else func_ty_lookup Φ' f
-  end.
-
-(** Struct definition environment: maps a struct name to its ordered
-    list of (field_name, field_type) pairs. *)
-Definition struct_env := list (string * list (string * ty)).
-
-Fixpoint struct_lookup (Σ : struct_env) (name : string)
-    : option (list (string * ty)) :=
-  match Σ with
-  | []              => None
-  | (s, fs) :: Σ' => if String.eqb name s then Some fs else struct_lookup Σ' s
-  end.
-
-Fixpoint field_lookup (fields : list (string * ty)) (fname : string)
-    : option ty :=
-  match fields with
-  | []              => None
-  | (f, τ) :: rest => if String.eqb fname f then Some τ else field_lookup rest fname
   end.
 
 (* ------------------------------------------------------------------ *)
@@ -83,13 +68,14 @@ Definition binop_type (op : binop) (τ : ty) : option ty :=
   (* Logical: Bool × Bool → Bool *)
   | OpLAnd, TBase BTBool => Some TBoolTy
   | OpLOr,  TBase BTBool => Some TBoolTy
-  (* Comparison: any base type × same base type → Bool *)
+  (* Equality: any base type × same base type → Bool *)
   | OpEq,  TBase _ => Some TBoolTy
   | OpNeq, TBase _ => Some TBoolTy
-  | OpLt,  TBase _ => Some TBoolTy
-  | OpLe,  TBase _ => Some TBoolTy
-  | OpGt,  TBase _ => Some TBoolTy
-  | OpGe,  TBase _ => Some TBoolTy
+  (* Ordered comparison: Field × Field → Bool *)
+  | OpLt,  TBase (BTField n) => Some TBoolTy
+  | OpLe,  TBase (BTField n) => Some TBoolTy
+  | OpGt,  TBase (BTField n) => Some TBoolTy
+  | OpGe,  TBase (BTField n) => Some TBoolTy
   (* Everything else is ill-typed *)
   | _, _ => None
   end.
@@ -116,7 +102,7 @@ Inductive has_type_expr
       has_type_expr Γ Φ Σ (EVar x) τ
 
   | TyConst : forall v τ,
-      wf_value v τ ->
+      wf_value Σ v τ ->
       has_type_expr Γ Φ Σ (EConst v) τ
 
   | TyBinop : forall op e1 e2 τ τ_res,
@@ -161,6 +147,7 @@ Inductive has_type_stmt
     : ty_env -> stmt -> ty_env -> Prop :=
 
   | TyLet : forall Γ vis τ x e,
+      fresh_in_ty_env Γ x ->
       has_type_expr Γ Φ Σ e τ ->
       has_type_stmt Φ Σ τ_ret Γ (SLet vis τ x e) ((x, τ) :: Γ)
 
@@ -183,6 +170,7 @@ Inductive has_type_stmt
       (** The loop variable [x] has type [Field<64>] inside the body.
           We require the body to type-check and produce some [Γ_body];
           the loop does not introduce [x] into the outer environment. *)
+      fresh_in_ty_env Γ x ->
       has_type_stmts Φ Σ τ_ret ((x, TField 64) :: Γ) body Γ_body ->
       has_type_stmt Φ Σ τ_ret Γ (SFor x lo hi body) Γ
 
