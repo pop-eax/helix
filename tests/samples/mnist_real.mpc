@@ -1,0 +1,94 @@
+// MNIST MLP — full dacorvo/mnist-mlp (HuggingFace)
+// Architecture : 784 -> 256 (ReLU) -> 256 (ReLU) -> 10 (signed argmax)
+// Fixed-point  : scale=64, clip=2.0
+// Field modulus: 2^63-1
+//
+// Run:
+//   helixc compile tests/samples/mnist_real.mpc
+//   runner tests/samples/mnist_real.ir --inputs-file tests/samples/mnist_real.toml
+
+fn relu(Secret Field<64> x) -> Field<64> {
+    if x < 4611686018427387903 {
+        return x;
+    } else {
+        return 0;
+    }
+}
+
+fn main(
+    Public Array<Field<64>, 200704> w1,
+    Public Array<Field<64>, 256> b1,
+    Public Array<Field<64>, 65536> w2,
+    Public Array<Field<64>, 256> b2,
+    Public Array<Field<64>, 2560> w3,
+    Public Array<Field<64>, 10> b3,
+    Secret Array<Field<64>, 784>   pixels
+) -> Field<64> {
+
+    // --- Layer 1: 784 -> 256 (ReLU) ---
+    let Secret Array<Field<64>, 256> h1 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for j in 0..256 {
+        h1[j] = b1[j];
+        for i in 0..784 {
+            h1[j] = h1[j] + w1[j * 784 + i] * pixels[i];
+        }
+        h1[j] = relu(h1[j]);
+    }
+
+    // --- Layer 2: 256 -> 256 (ReLU) ---
+    let Secret Array<Field<64>, 256> h2 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for j in 0..256 {
+        h2[j] = b2[j];
+        for i in 0..256 {
+            h2[j] = h2[j] + w2[j * 256 + i] * h1[i];
+        }
+        h2[j] = relu(h2[j]);
+    }
+
+    // --- Layer 3: 256 -> 10 (logits) ---
+    let Secret Array<Field<64>, 10> logit = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for j in 0..10 {
+        logit[j] = b3[j];
+        for i in 0..256 {
+            logit[j] = logit[j] + w3[j * 256 + i] * h2[i];
+        }
+    }
+
+    // --- Signed Argmax ---
+    let Secret Field<64> HALF = 4611686018427387903;
+    let Secret Field<64> best_val = logit[0];
+    let Secret Field<64> best_idx = 0;
+    for j in 1..10 {
+        let Secret Bool lj_neg = logit[j] >= HALF;
+        let Secret Bool bv_neg = best_val >= HALF;
+        if lj_neg {
+            if bv_neg {
+                if logit[j] > best_val {
+                    best_val = logit[j];
+                    best_idx = j;
+                } else {
+                    best_val = best_val;
+                    best_idx = best_idx;
+                }
+            } else {
+                best_val = best_val;
+                best_idx = best_idx;
+            }
+        } else {
+            if bv_neg {
+                best_val = logit[j];
+                best_idx = j;
+            } else {
+                if logit[j] > best_val {
+                    best_val = logit[j];
+                    best_idx = j;
+                } else {
+                    best_val = best_val;
+                    best_idx = best_idx;
+                }
+            }
+        }
+    }
+
+    return best_idx;
+}

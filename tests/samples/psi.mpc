@@ -1,0 +1,31 @@
+// Private Set Intersection (PSI) — 8-element sets
+//
+// Two parties compute the size of the intersection of their private sets
+// without revealing the sets themselves.
+//
+// Circuit: 64 equality checks + 8 OR chains (64 gates) + 8 Select gates
+// Alice holds inputs[0..7], Bob holds inputs[8..15]
+//
+// Protocol: BGW (n-party) or Yao (2-party)
+//
+// Example (clear):
+//   runner psi.ir -i "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16" -b clear  => 0
+//   runner psi.ir -i "1,2,3,4,5,6,7,8,1,2,3,4,9,10,11,12"     -b clear  => 4
+fn psi(
+    Secret Array<Field<64>, 8> alice,
+    Secret Array<Field<64>, 8> bob
+) -> Field<64> {
+    let Secret Field<64> count = 0;
+    for i in 0..8 {
+        let Secret Bool found = false;
+        for j in 0..8 {
+            found = found || (alice[i] == bob[j]);
+        }
+        if found {
+            count = count + 1;
+        } else {
+            count = count;
+        }
+    }
+    return count;
+}

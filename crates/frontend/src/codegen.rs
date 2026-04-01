@@ -286,10 +286,46 @@ impl Codegen {
             } else {
                 return Err(CodegenError::UndefinedVariable(assign.lvalue.base.clone()));
             }
+        } else if assign.lvalue.accesses.len() == 1 {
+            if let LValueAccess::Array(index_expr) = &assign.lvalue.accesses[0].clone() {
+                let base_val = self.lookup_variable(&assign.lvalue.base).cloned()
+                    .ok_or_else(|| CodegenError::UndefinedVariable(assign.lvalue.base.clone()))?;
+                let index = self.convert_expression(index_expr)?;
+                match index {
+                    HirValue::Constant(HirConstant::Field { value: idx, .. }) => {
+                        let idx = idx as usize;
+                        if let Some(elements) = self.arrays.get_mut(&base_val) {
+                            if idx < elements.len() {
+                                elements[idx] = value;
+                            } else {
+                                return Err(CodegenError::InvalidTypeConversion(format!(
+                                    "Array index {} out of bounds (size {})",
+                                    idx,
+                                    elements.len()
+                                )));
+                            }
+                        } else {
+                            return Err(CodegenError::InvalidTypeConversion(
+                                "Cannot assign to element: variable is not an array".to_string(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(CodegenError::InvalidTypeConversion(
+                            "Array element assignment requires a compile-time constant index \
+                             (use a for-loop variable)"
+                                .to_string(),
+                        ))
+                    }
+                }
+            } else {
+                return Err(CodegenError::InvalidTypeConversion(
+                    "Struct field assignment not yet implemented".to_string(),
+                ));
+            }
         } else {
-            // Array/struct field assignment - needs special handling
             return Err(CodegenError::InvalidTypeConversion(
-                "Complex lvalue assignment not yet implemented".to_string(),
+                "Chained lvalue assignment not yet implemented".to_string(),
             ));
         }
         
@@ -299,10 +335,19 @@ impl Codegen {
     fn convert_if_statement(&mut self, if_stmt: &IfStatement) -> CodegenResult<()> {
         let condition = self.convert_expression(&if_stmt.condition)?;
 
-        // Snapshot of variables visible before the branch.
-        let pre_snap: HashMap<String, HirValue> = self.variables.last()
-            .cloned()
-            .unwrap_or_default();
+        // Snapshot of ALL variables visible before the branch (across all scopes,
+        // innermost wins).  We need the full view so that assignments to outer-scope
+        // variables (e.g. an accumulator declared before a loop) are included in the
+        // merge and generate the correct Select gate.
+        let pre_snap: HashMap<String, HirValue> = {
+            let mut snap = HashMap::new();
+            for scope in &self.variables {
+                for (k, v) in scope {
+                    snap.insert(k.clone(), v.clone());
+                }
+            }
+            snap
+        };
 
         // ---- Compile then-branch in its own scope ----
         // Bump inline_depth so that any `return` inside the branch is captured
@@ -617,12 +662,37 @@ impl Codegen {
         ))
     }
 
+    /// Fold two Field constants under an arithmetic op, applying the field modulus.
+    fn fold_field_arith(
+        op: &str,
+        lv: u64,
+        rv: u64,
+        size: u64,
+    ) -> Option<HirValue> {
+        let modulus: u64 = (1u64 << 63) - 1; // 2^63 - 1
+        let result = match op {
+            "add" => lv.wrapping_add(rv) % modulus,
+            "sub" => lv.wrapping_add(modulus).wrapping_sub(rv) % modulus,
+            "mul" => ((lv as u128).wrapping_mul(rv as u128) % modulus as u128) as u64,
+            _ => return None,
+        };
+        Some(HirValue::Constant(HirConstant::Field { value: result, size }))
+    }
+
     fn convert_binary_op(&mut self, bin_op: &BinaryOp) -> CodegenResult<HirValue> {
         match bin_op {
             BinaryOp::Add(left, right) => {
                 let left_val = self.convert_expression(left)?;
                 let right_val = self.convert_expression(right)?;
-                let ty = HirType::Field { size: 64 }; // Infer from types
+                if let (
+                    HirValue::Constant(HirConstant::Field { value: lv, size }),
+                    HirValue::Constant(HirConstant::Field { value: rv, .. }),
+                ) = (&left_val, &right_val) {
+                    if let Some(folded) = Self::fold_field_arith("add", *lv, *rv, *size) {
+                        return Ok(folded);
+                    }
+                }
+                let ty = HirType::Field { size: 64 };
                 let value_id = self.builder.add_instruction(
                     HirInstructionKind::Add { left: left_val, right: right_val },
                     ty,
@@ -632,6 +702,14 @@ impl Codegen {
             BinaryOp::Subtract(left, right) => {
                 let left_val = self.convert_expression(left)?;
                 let right_val = self.convert_expression(right)?;
+                if let (
+                    HirValue::Constant(HirConstant::Field { value: lv, size }),
+                    HirValue::Constant(HirConstant::Field { value: rv, .. }),
+                ) = (&left_val, &right_val) {
+                    if let Some(folded) = Self::fold_field_arith("sub", *lv, *rv, *size) {
+                        return Ok(folded);
+                    }
+                }
                 let ty = HirType::Field { size: 64 };
                 let value_id = self.builder.add_instruction(
                     HirInstructionKind::Sub { left: left_val, right: right_val },
@@ -642,6 +720,14 @@ impl Codegen {
             BinaryOp::Multiply(left, right) => {
                 let left_val = self.convert_expression(left)?;
                 let right_val = self.convert_expression(right)?;
+                if let (
+                    HirValue::Constant(HirConstant::Field { value: lv, size }),
+                    HirValue::Constant(HirConstant::Field { value: rv, .. }),
+                ) = (&left_val, &right_val) {
+                    if let Some(folded) = Self::fold_field_arith("mul", *lv, *rv, *size) {
+                        return Ok(folded);
+                    }
+                }
                 let ty = HirType::Field { size: 64 };
                 let value_id = self.builder.add_instruction(
                     HirInstructionKind::Mul { left: left_val, right: right_val },
