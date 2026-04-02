@@ -50,6 +50,47 @@ impl<'a> CircuitIndex<'a> {
     }
 }
 
+/// Group instructions by circuit level (topological depth).
+///
+/// Gates at the same level have no dependencies on each other and can be
+/// executed in parallel.  Level 0 = circuit inputs; each gate's level is
+/// `max(level of its inputs) + 1`.
+pub fn levelized_instructions(circuit: &Circuit) -> Vec<Vec<Instruction>> {
+    let mut wire_level: HashMap<WireId, u32> = circuit
+        .inputs
+        .iter()
+        .map(|i| (i.wire, 0u32))
+        .collect();
+
+    let mut sorted_gates: Vec<&Gate> = circuit.gates.iter().collect();
+    sorted_gates.sort_by_key(|g| g.id.0);
+
+    let mut gate_levels: Vec<u32> = Vec::with_capacity(sorted_gates.len());
+    for gate in &sorted_gates {
+        let lv = gate
+            .inputs
+            .iter()
+            .map(|w| wire_level.get(w).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        wire_level.insert(gate.output, lv);
+        gate_levels.push(lv);
+    }
+
+    if gate_levels.is_empty() {
+        return Vec::new();
+    }
+
+    let max_level = *gate_levels.iter().max().unwrap() as usize;
+    let idx = CircuitIndex::build(circuit);
+    let mut levels: Vec<Vec<Instruction>> = vec![Vec::new(); max_level + 1];
+    for (gate, &lv) in sorted_gates.iter().zip(&gate_levels) {
+        levels[lv as usize].push(gate_to_instruction(gate, &idx));
+    }
+    levels
+}
+
 /// Convert LIR circuit to VM instructions
 pub fn compile_to_vm_instructions(circuit: &Circuit) -> Vec<Instruction> {
     let idx = CircuitIndex::build(circuit);

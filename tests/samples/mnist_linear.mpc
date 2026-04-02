@@ -1,0 +1,51 @@
+// Linear MNIST for BGW — no relu, no comparison gates
+// Architecture : 784 -> 256 -> 256 -> 10  (all linear, no activation)
+// Fixed-point  : scale=64, clip=2.0
+// Returns all 10 logit values as a 10-element array output
+//
+// BGW computes the full linear forward pass under secret sharing.
+// Argmax must be done in the clear after reconstruction.
+//
+// Run (single-process BGW, 3 parties, threshold 1):
+//   runner tests/samples/mnist_linear.ir \
+//     --inputs-file tests/samples/mnist_linear.toml \
+//     --backend bgw --parties 3 --threshold 1
+
+fn linear_forward(
+    Public Array<Field<64>, 200704> w1,
+    Public Array<Field<64>, 256> b1,
+    Public Array<Field<64>, 65536> w2,
+    Public Array<Field<64>, 256> b2,
+    Public Array<Field<64>, 2560> w3,
+    Public Array<Field<64>, 10> b3,
+    Secret Array<Field<64>, 784>   pixels
+) -> Field<64> {
+
+    // --- Layer 1: 784 -> 256 (linear, no relu) ---
+    let Secret Array<Field<64>, 256> h1 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for j in 0..256 {
+        h1[j] = b1[j];
+        for i in 0..784 {
+            h1[j] = h1[j] + w1[j * 784 + i] * pixels[i];
+        }
+    }
+
+    // --- Layer 2: 256 -> 256 (linear, no relu) ---
+    let Secret Array<Field<64>, 256> h2 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for j in 0..256 {
+        h2[j] = b2[j];
+        for i in 0..256 {
+            h2[j] = h2[j] + w2[j * 256 + i] * h1[i];
+        }
+    }
+
+    // --- Layer 3: 256 -> 10 (linear) ---
+    // Returns logit[0] as a single output for demo.
+    // Replace '0' with 0..9 to get any class logit.
+    let Secret Field<64> logit0 = b3[0];
+    for i in 0..256 {
+        logit0 = logit0 + w3[0 * 256 + i] * h2[i];
+    }
+
+    return logit0;
+}

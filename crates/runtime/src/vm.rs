@@ -195,6 +195,19 @@ impl VMState {
 pub trait Backend {
     /// Execute a single instruction
     fn execute_instruction(&mut self, instruction: &Instruction, state: &mut VMState) -> Result<(), BackendError>;
+
+    /// Execute a batch of independent instructions (all at the same circuit level).
+    ///
+    /// Backends may override this to exploit parallelism within the batch
+    /// (e.g. rayon for the clear backend) or to batch network rounds
+    /// (e.g. BGW Beaver-triple multiplication).  The default falls back to
+    /// sequential [`execute_instruction`] calls.
+    fn execute_batch(&mut self, instructions: &[Instruction], state: &mut VMState) -> Result<(), BackendError> {
+        for instr in instructions {
+            self.execute_instruction(instr, state)?;
+        }
+        Ok(())
+    }
     
     /// Get the name of this backend
     fn name(&self) -> &'static str;

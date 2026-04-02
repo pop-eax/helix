@@ -3,6 +3,7 @@ pub mod commit;
 pub mod field;
 pub mod ir;
 pub mod lowering;
+pub mod mersenne_field;
 pub mod net_backend;
 pub mod ops;
 pub mod shamir;
@@ -26,7 +27,7 @@ pub use types::{PartyShares, Share};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_bls12_381::Fr;
+    use crate::mersenne_field::Mersenne63 as Fr;
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::SeedableRng;
 

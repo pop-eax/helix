@@ -26,10 +26,10 @@ pub fn execute_program<B: Backend>(
         backend.set_input(*wire, *value, visibility, &mut state)?;
     }
     
-    let instructions = crate::compiler::compile_to_vm_instructions(&program.circuit);
-    
-    for instruction in &instructions {
-        backend.execute_instruction(instruction, &mut state)?;
+    let levels = crate::compiler::levelized_instructions(&program.circuit);
+
+    for level in &levels {
+        backend.execute_batch(level, &mut state)?;
     }
     
     let mut outputs = Vec::new();

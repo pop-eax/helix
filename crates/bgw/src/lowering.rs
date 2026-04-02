@@ -1,6 +1,6 @@
 use crate::field::u64_to_field;
 use crate::ir::{BgwNodeId, BgwOp, BgwProgram};
-use ark_bls12_381::Fr;
+use crate::mersenne_field::Mersenne63 as Fr;
 use ir::lir::WireId;
 use runtime::vm::{BackendError, Instruction};
 

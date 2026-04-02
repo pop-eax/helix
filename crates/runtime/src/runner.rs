@@ -4,7 +4,7 @@ use net::NetworkLayer;
 use thiserror::Error;
 
 use crate::{
-    compiler::compile_to_vm_instructions,
+    compiler::levelized_instructions,
     vm::{Backend, BackendError, Instruction, VMState},
 };
 use ir::lir::{Program, Visibility, WireId};
@@ -81,10 +81,11 @@ pub struct Runner<N, B> {
     state: VMState,
     /// One descriptor per circuit input, in declaration order.
     init_specs: Vec<InitSpec>,
-    /// Compiled gate instructions.
-    instructions: Vec<Instruction>,
-    /// Gate program counter.
-    pc: usize,
+    /// Gate instructions grouped by circuit level.
+    /// Gates at the same level are independent and executed as one batch.
+    levels: Vec<Vec<Instruction>>,
+    /// Level program counter.
+    level_pc: usize,
     /// Set after `init_inputs` completes.
     inputs_done: bool,
     /// Plaintext values for wires owned by this party.
@@ -136,7 +137,7 @@ impl<N: NetworkLayer, B: Backend> Runner<N, B> {
             })
             .collect::<Result<Vec<_>, RunnerError>>()?;
 
-        let instructions = compile_to_vm_instructions(&program.circuit);
+        let levels = levelized_instructions(&program.circuit);
 
         let my_values = inputs
             .iter()
@@ -149,8 +150,8 @@ impl<N: NetworkLayer, B: Backend> Runner<N, B> {
             program,
             state,
             init_specs,
-            instructions,
-            pc: 0,
+            levels,
+            level_pc: 0,
             inputs_done: false,
             my_values,
         })
@@ -166,14 +167,15 @@ impl<N: NetworkLayer, B: Backend> Runner<N, B> {
             self.inputs_done = true;
         }
 
-        if self.pc >= self.instructions.len() {
+        if self.level_pc >= self.levels.len() {
             return Ok(Step::Done(self.collect_outputs().await?));
         }
 
-        let instr = self.instructions[self.pc].clone();
-        self.pc += 1;
+        // Clone the level so we can borrow self.backend and self.state mutably.
+        let level = self.levels[self.level_pc].clone();
+        self.level_pc += 1;
 
-        self.backend.execute_instruction(&instr, &mut self.state)?;
+        self.backend.execute_batch(&level, &mut self.state)?;
 
         let outgoing = self.backend.take_outgoing();
         if !outgoing.is_empty() {

@@ -106,7 +106,7 @@ pub fn multiply_shares_with_triple<F: PrimeField>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_bls12_381::Fr;
+    use crate::mersenne_field::Mersenne63 as Fr;
 
     #[test]
     fn share_add_sub_mul_scalar() {

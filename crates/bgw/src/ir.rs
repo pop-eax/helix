@@ -1,4 +1,4 @@
-use ark_bls12_381::Fr;
+use crate::mersenne_field::Mersenne63 as Fr;
 use ir::lir::WireId;
 use std::collections::HashMap;
 

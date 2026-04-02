@@ -4,7 +4,7 @@ use crate::lowering::lower_instruction;
 use crate::ops::{add_shares, multiply_shares, sub_shares};
 use crate::shamir::{reconstruct_secret, share_secret};
 use crate::types::{PartyShares, Share};
-use ark_bls12_381::Fr;
+use crate::mersenne_field::Mersenne63 as Fr;
 use ir::lir::WireId;
 use runtime::vm::{Backend, BackendError, Instruction, VMState, WireValue};
 use runtime::Visibility;

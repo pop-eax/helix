@@ -1,6 +1,7 @@
 use super::gate::Gate;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
+use rayon::prelude::*;
 
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -82,6 +83,71 @@ impl Circuit {
             if let Some(output_label) = gate.clone().evaluate(input_labels) {
                 active_labels.insert(gate.output_label().to_string(), output_label);
             }
+        }
+
+        active_labels
+    }
+
+    /// Compute the topological level of each gate in the boolean circuit.
+    /// Returns a Vec parallel to `self.gates` (gate i → its level).
+    /// Input wires (those in `self.inputs`) are at level 0.
+    pub fn compute_gate_levels(&self) -> Vec<u32> {
+        let mut wire_level: HashMap<&str, u32> = self
+            .inputs
+            .iter()
+            .map(|name| (name.as_str(), 0u32))
+            .collect();
+
+        let mut levels = Vec::with_capacity(self.gates.len());
+        for gate in &self.gates {
+            let lv = gate
+                .input_labels()
+                .iter()
+                .map(|name| wire_level.get(name.as_str()).copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0)
+                + 1;
+            wire_level.insert(gate.output_label(), lv);
+            levels.push(lv);
+        }
+        levels
+    }
+
+    /// Level-parallel evaluation using rayon.
+    ///
+    /// Gates at the same topological level are independent and evaluated
+    /// concurrently.  Suitable for circuits up to a few million gates; for
+    /// very large circuits the level-computation overhead may dominate.
+    pub fn evaluate_parallel(&self, mut active_labels: HashMap<String, u128>) -> HashMap<String, u128> {
+        if self.gates.is_empty() {
+            return active_labels;
+        }
+
+        let gate_levels = self.compute_gate_levels();
+        let max_level = *gate_levels.iter().max().unwrap() as usize;
+
+        // Group gate indices by level.
+        let mut by_level: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+        for (idx, &lv) in gate_levels.iter().enumerate() {
+            by_level[lv as usize].push(idx);
+        }
+
+        for level_indices in &by_level {
+            // Parallel: each gate reads from active_labels (all earlier levels).
+            let new_labels: Vec<(String, u128)> = level_indices
+                .par_iter()
+                .filter_map(|&idx| {
+                    let gate = &self.gates[idx];
+                    let inputs: Vec<u128> = gate
+                        .input_labels()
+                        .iter()
+                        .map(|n| active_labels[n.as_str()])
+                        .collect();
+                    gate.clone().evaluate(inputs).map(|lbl| (gate.output_label().to_string(), lbl))
+                })
+                .collect();
+            // Sequential write: each wire is written by exactly one gate.
+            active_labels.extend(new_labels);
         }
 
         active_labels

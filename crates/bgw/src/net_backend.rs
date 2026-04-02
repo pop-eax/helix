@@ -19,62 +19,71 @@
 //!
 //! Add/Sub/constants are purely local — share arithmetic is linear.
 
-use ark_bls12_381::{Fr, G1Projective};
 use ark_ff::PrimeField;
 use ir::lir::WireId;
 use runtime::vm::{Backend, BackendError, Instruction, VMState, WireValue};
 use runtime::Visibility;
 use std::collections::HashMap;
 
-use crate::commit;
 use crate::field::{field_to_u64_checked, u64_to_field};
+use crate::mersenne_field::Mersenne63 as Fr;
 use crate::shamir::{reconstruct_secret, sample_and_share};
 use crate::types::Share;
 
-// ---- Fr serialisation (32 bytes, 4 × little-endian u64 limbs) ----
+// ---- Mersenne63 serialisation (8 bytes, single little-endian u64 limb) ----
 
 fn fr_to_bytes(f: Fr) -> Vec<u8> {
     let bigint = f.into_bigint();
-    bigint.as_ref().iter().flat_map(|&l| l.to_le_bytes()).collect()
+    bigint.as_ref()[0].to_le_bytes().to_vec()
 }
 
 fn fr_from_bytes(bytes: &[u8]) -> Result<Fr, BackendError> {
-    if bytes.len() != 32 {
+    if bytes.len() < 8 {
         return Err(BackendError::BackendError(format!(
-            "expected 32 bytes for Fr, got {}",
+            "expected 8 bytes for Mersenne63, got {}",
             bytes.len()
         )));
     }
-    let mut limbs = [0u64; 4];
-    for (i, chunk) in bytes.chunks_exact(8).enumerate() {
-        limbs[i] = u64::from_le_bytes(chunk.try_into().unwrap());
-    }
-    Fr::from_bigint(ark_ff::BigInt(limbs))
-        .ok_or_else(|| BackendError::BackendError("Fr deserialization: value out of range".into()))
+    let limb = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    Fr::from_bigint(ark_ff::BigInt([limb]))
+        .ok_or_else(|| BackendError::BackendError("Mersenne63 deserialization: value out of range (must be < 2^63-1)".into()))
 }
 
 // ---- Pending operation state ----
 
+/// One Mul slot in a batched network round.
+struct MulSlot {
+    output_wire: WireId,
+    a_i: Share<Fr>,
+    b_i: Share<Fr>,
+    c_i: Share<Fr>,
+    d_i: Fr,
+    e_i: Fr,
+}
+
+/// One Select slot in a batched network round.
+struct SelectSlot {
+    output_wire: WireId,
+    else_val_i: Share<Fr>,
+    a_i: Share<Fr>,
+    b_i: Share<Fr>,
+    c_i: Share<Fr>,
+    d_i: Fr,
+    e_i: Fr,
+}
+
 enum PendingOp {
-    /// Waiting for peers' (d_j, e_j) shares to finish a multiplication.
-    Mul {
-        output_wire: WireId,
-        a_i: Share<Fr>, // my Beaver triple share of a
-        b_i: Share<Fr>, // my Beaver triple share of b
-        c_i: Share<Fr>, // my Beaver triple share of c = a*b
-        d_i: Fr,        // my share of δ = x − a
-        e_i: Fr,        // my share of ε = y − b
-    },
-    /// Select: same Beaver round as Mul for (cond * diff); then add else_val_i.
-    /// output = else_val + cond * (then_val - else_val)
-    Select {
-        output_wire: WireId,
-        else_val_i: Share<Fr>, // my share of else_val, added after the mul
-        a_i: Share<Fr>,
-        b_i: Share<Fr>,
-        c_i: Share<Fr>,
-        d_i: Fr,
-        e_i: Fr,
+    /// Batched Beaver round: all Mul and Select gates from one circuit level
+    /// are processed in a single broadcast exchange.
+    ///
+    /// Wire format (per peer message):
+    ///   4 bytes  n_muls   (u32 LE)
+    ///   4 bytes  n_selects (u32 LE)
+    ///   64 bytes per slot (d_i ‖ e_i, each 32 bytes Fr)
+    ///   Mul slots first, then Select slots.
+    MulBatch {
+        muls:    Vec<MulSlot>,
+        selects: Vec<SelectSlot>,
     },
     /// Waiting for peers' output shares to reconstruct final values.
     Output { wires: Vec<WireId> },
@@ -99,9 +108,6 @@ pub struct BgwNetBackend {
     /// Per-party OsRng for input sharing — independent across parties.
     input_rng: ark_std::rand::rngs::OsRng,
     output_cache: HashMap<WireId, u64>,
-    /// Feldman VSS commitment shadow: `Some(C)` = wire has a live commitment,
-    /// `None` = commitment was broken by a Mul/Select gate.
-    wire_commit: HashMap<WireId, Option<G1Projective>>,
     /// 1-based party index for Shamir evaluation (= my_id + 1).
     party_index: usize,
 }
@@ -141,7 +147,6 @@ impl BgwNetBackend {
             triple_queue: triple_shares.into(),
             input_rng: ark_std::rand::rngs::OsRng,
             output_cache: HashMap::new(),
-            wire_commit: HashMap::new(),
             party_index: my_id + 1,
         })
     }
@@ -173,23 +178,6 @@ impl BgwNetBackend {
     }
 }
 
-// ---- Commitment propagation helpers ----
-
-/// `C(a+b) = C(a) + C(b)` — returns `None` if either input has no commitment.
-fn opt_add_commits(a: Option<G1Projective>, b: Option<G1Projective>) -> Option<G1Projective> {
-    match (a, b) {
-        (Some(ca), Some(cb)) => Some(commit::add_commits(ca, cb)),
-        _ => None,
-    }
-}
-
-/// `C(a-b) = C(a) - C(b)` — returns `None` if either input has no commitment.
-fn opt_sub_commits(a: Option<G1Projective>, b: Option<G1Projective>) -> Option<G1Projective> {
-    match (a, b) {
-        (Some(ca), Some(cb)) => Some(commit::sub_commits(ca, cb)),
-        _ => None,
-    }
-}
 
 impl Backend for BgwNetBackend {
     fn name(&self) -> &'static str {
@@ -199,35 +187,25 @@ impl Backend for BgwNetBackend {
     // ---- Input distribution ----
 
     /// Called by the party that OWNS this wire.
-    /// Returns one serialised blob per party: `[32 bytes: Fr share] ++ [(t+1)*48 bytes: Feldman commit vec]`.
+    /// Returns one serialised blob per party: `[8 bytes: Mersenne63 share]`.
     fn share_input(
         &mut self,
         _wire: WireId,
         value: u64,
         n_parties: usize,
     ) -> Result<Vec<Vec<u8>>, BackendError> {
-        let (all, coeffs) = sample_and_share(
+        let (all, _coeffs) = sample_and_share(
             u64_to_field::<Fr>(value),
             self.threshold,
             n_parties,
             &mut self.input_rng,
         )
         .map_err(|e| BackendError::BackendError(format!("share_input: {e:?}")))?;
-        let commit_vec = commit::feldman_commitments(&coeffs);
-        let commit_bytes = commit::serialize_commit_vec(&commit_vec);
-        Ok(all
-            .into_inner()
-            .into_iter()
-            .map(|s| {
-                let mut blob = fr_to_bytes(s.0);
-                blob.extend_from_slice(&commit_bytes);
-                blob
-            })
-            .collect())
+        Ok(all.into_inner().into_iter().map(|s| fr_to_bytes(s.0)).collect())
     }
 
     /// Called with the blob pushed to us by the wire's owner.
-    /// Blob format: `[32 bytes: Fr share] ++ [(t+1)*48 bytes: Feldman commit vec]`.
+    /// Blob format: `[8 bytes: Mersenne63 share]`.
     fn receive_input_share(
         &mut self,
         wire: WireId,
@@ -235,28 +213,14 @@ impl Backend for BgwNetBackend {
         share: Vec<u8>,
         state: &mut VMState,
     ) -> Result<(), BackendError> {
-        if share.len() < 32 {
+        if share.len() < 8 {
             return Err(BackendError::BackendError(format!(
-                "share blob too short: {} bytes",
+                "share blob too short: {} bytes (expected 8)",
                 share.len()
             )));
         }
-        let s = fr_from_bytes(&share[..32])?;
-        let commit_opt = if share.len() > 32 {
-            let commit_vec = commit::deserialize_commit_vec(&share[32..])
-                .map_err(|e| BackendError::BackendError(e))?;
-            if !commit::verify_share(s, self.party_index, &commit_vec) {
-                return Err(BackendError::BackendError(
-                    "Feldman VSS share verification failed — input may have been tampered with"
-                        .into(),
-                ));
-            }
-            Some(commit_vec[0])
-        } else {
-            None
-        };
+        let s = fr_from_bytes(&share[..8])?;
         self.my_shares.insert(wire, Share(s));
-        self.wire_commit.insert(wire, commit_opt);
         state.set_wire(wire, WireValue::Secret, Visibility::Secret);
         Ok(())
     }
@@ -270,15 +234,13 @@ impl Backend for BgwNetBackend {
         visibility: Visibility,
         state: &mut VMState,
     ) -> Result<(), BackendError> {
-        let (all, coeffs) = sample_and_share(
+        let (all, _coeffs) = sample_and_share(
             u64_to_field::<Fr>(value),
             self.threshold,
             self.n_parties,
             &mut self.input_rng,
         )
         .map_err(|e| BackendError::BackendError(format!("set_input: {e:?}")))?;
-        let commit_vec = commit::feldman_commitments(&coeffs);
-        self.wire_commit.insert(wire, Some(commit_vec[0]));
         self.my_shares.insert(wire, all.as_slice()[self.my_id]);
         state.set_wire(wire, WireValue::Secret, visibility);
         Ok(())
@@ -296,31 +258,17 @@ impl Backend for BgwNetBackend {
             Instruction::Add { vis, input1, input2, output, .. } => {
                 let z = Share(self.my_share(*input1)?.0 + self.my_share(*input2)?.0);
                 self.my_shares.insert(*output, z);
-                let c = opt_add_commits(
-                    self.wire_commit.get(input1).and_then(|x| x.as_ref()).cloned(),
-                    self.wire_commit.get(input2).and_then(|x| x.as_ref()).cloned(),
-                );
-                self.wire_commit.insert(*output, c);
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
             Instruction::Sub { vis, input1, input2, output, .. } => {
                 let z = Share(self.my_share(*input1)?.0 - self.my_share(*input2)?.0);
                 self.my_shares.insert(*output, z);
-                let c = opt_sub_commits(
-                    self.wire_commit.get(input1).and_then(|x| x.as_ref()).cloned(),
-                    self.wire_commit.get(input2).and_then(|x| x.as_ref()).cloned(),
-                );
-                self.wire_commit.insert(*output, c);
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
             // Public constants: every party holds the constant itself.
             // Reconstruction: Σ λ_i · c = c · Σ λ_i = c · 1 = c  ✓
             Instruction::Constant { value, output, visibility, .. } => {
                 self.my_shares.insert(*output, Share(u64_to_field::<Fr>(*value)));
-                self.wire_commit.insert(
-                    *output,
-                    Some(commit::constant_commit(u64_to_field::<Fr>(*value))),
-                );
                 state.set_wire(*output, WireValue::Secret, *visibility);
             }
             // Constant-operand gates: every party applies the same linear op.
@@ -328,100 +276,61 @@ impl Backend for BgwNetBackend {
                 let c_fr = u64_to_field::<Fr>(*constant);
                 let z = Share(self.my_share(*input)?.0 + c_fr);
                 self.my_shares.insert(*output, z);
-                let wc = self
-                    .wire_commit
-                    .get(input)
-                    .and_then(|x| x.as_ref())
-                    .cloned()
-                    .map(|c| commit::add_commits(c, commit::constant_commit(c_fr)));
-                self.wire_commit.insert(*output, wc);
                 state.set_wire(*output, WireValue::Secret, *vis);
             }
             Instruction::SubConstant { vis, input, constant, output, .. } => {
                 let c_fr = u64_to_field::<Fr>(*constant);
                 let z = Share(self.my_share(*input)?.0 - c_fr);
                 self.my_shares.insert(*output, z);
-                let wc = self
-                    .wire_commit
-                    .get(input)
-                    .and_then(|x| x.as_ref())
-                    .cloned()
-                    .map(|c| commit::sub_commits(c, commit::constant_commit(c_fr)));
-                self.wire_commit.insert(*output, wc);
                 state.set_wire(*output, WireValue::Secret, *vis);
             }
             Instruction::MulConstant { vis, input, constant, output, .. } => {
                 let c_fr = u64_to_field::<Fr>(*constant);
                 let z = Share(self.my_share(*input)?.0 * c_fr);
                 self.my_shares.insert(*output, z);
-                let wc = self
-                    .wire_commit
-                    .get(input)
-                    .and_then(|x| x.as_ref())
-                    .cloned()
-                    .map(|c| commit::scale_commit(c, c_fr));
-                self.wire_commit.insert(*output, wc);
                 state.set_wire(*output, WireValue::Secret, *vis);
             }
 
-            // Multiplication — needs one broadcast round (Beaver triples).
-            // Breaks the commitment chain: output commitment is marked None.
+            // Multiplication — single-gate path: wrap in a one-element MulBatch.
             Instruction::Mul { vis, input1, input2, output, .. } => {
                 let x_i = self.my_share(*input1)?;
                 let y_i = self.my_share(*input2)?;
-
                 let (a_i, b_i, c_i) = self.pop_triple()?;
+                let d_i = x_i.0 - a_i.0;
+                let e_i = y_i.0 - b_i.0;
 
-                let d_i = x_i.0 - a_i.0; // my share of δ = x − a
-                let e_i = y_i.0 - b_i.0; // my share of ε = y − b
-
-                // Broadcast (d_i, e_i) so every party can reconstruct δ, ε.
-                let mut msg = fr_to_bytes(d_i);
+                let slot = MulSlot { output_wire: *output, a_i, b_i, c_i, d_i, e_i };
+                let mut msg = Vec::with_capacity(8 + 16);
+                msg.extend_from_slice(&1u32.to_le_bytes()); // n_muls = 1
+                msg.extend_from_slice(&0u32.to_le_bytes()); // n_selects = 0
+                msg.extend(fr_to_bytes(d_i));
                 msg.extend(fr_to_bytes(e_i));
                 self.broadcast(msg);
 
-                self.pending = Some(PendingOp::Mul {
-                    output_wire: *output,
-                    a_i,
-                    b_i,
-                    c_i,
-                    d_i,
-                    e_i,
-                });
-                self.wire_commit.insert(*output, None); // Mul breaks linearity
+                self.pending = Some(PendingOp::MulBatch { muls: vec![slot], selects: vec![] });
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
 
             // Select: output = else_val + condition * (then_val - else_val)
-            // The subtraction is local; the multiply needs one Beaver round.
-            // Breaks the commitment chain: output commitment is marked None.
+            // Single-gate path: wrap in a one-element MulBatch (select slot).
             Instruction::Select { output_vis, condition, then_val, else_val, output } => {
                 let cond_i = self.my_share(*condition)?;
                 let tv_i = self.my_share(*then_val)?;
                 let ev_i = self.my_share(*else_val)?;
-
-                // diff_i = then_val_i - else_val_i  (local)
                 let diff_i = Share(tv_i.0 - ev_i.0);
-
                 let (a_i, b_i, c_i) = self.pop_triple()?;
-
                 let d_i = cond_i.0 - a_i.0;
                 let e_i = diff_i.0 - b_i.0;
 
-                let mut msg = fr_to_bytes(d_i);
+                let slot = SelectSlot { output_wire: *output, else_val_i: ev_i, a_i, b_i, c_i, d_i, e_i };
+                let mut msg = Vec::with_capacity(8 + 16);
+                msg.extend_from_slice(&0u32.to_le_bytes()); // n_muls = 0
+                msg.extend_from_slice(&1u32.to_le_bytes()); // n_selects = 1
+                msg.extend(fr_to_bytes(d_i));
                 msg.extend(fr_to_bytes(e_i));
                 self.broadcast(msg);
 
-                self.pending = Some(PendingOp::Select {
-                    output_wire: *output,
-                    else_val_i: ev_i,
-                    a_i,
-                    b_i,
-                    c_i,
-                    d_i,
-                    e_i,
-                });
-                self.wire_commit.insert(*output, None); // Select breaks linearity
+                self.pending = Some(PendingOp::MulBatch { muls: vec![], selects: vec![slot] });
                 state.set_wire(*output, WireValue::Secret, *output_vis);
             }
 
@@ -442,70 +351,139 @@ impl Backend for BgwNetBackend {
         Ok(())
     }
 
+    /// Level-batched execution: process all linear gates locally, then batch
+    /// all Mul/Select gates into a single network round per circuit level.
+    ///
+    /// This reduces network rounds from O(n_multiplications) to O(circuit_depth),
+    /// a dramatic speedup for circuits like MNIST linear (268K muls → 3 rounds).
+    fn execute_batch(&mut self, instructions: &[Instruction], state: &mut VMState) -> Result<(), BackendError> {
+        let mut muls:    Vec<MulSlot>    = Vec::new();
+        let mut selects: Vec<SelectSlot> = Vec::new();
+
+        for instruction in instructions {
+            match instruction {
+                Instruction::Mul { vis, input1, input2, output, .. } => {
+                    let x_i = self.my_share(*input1)?;
+                    let y_i = self.my_share(*input2)?;
+                    let (a_i, b_i, c_i) = self.pop_triple()?;
+                    let d_i = x_i.0 - a_i.0;
+                    let e_i = y_i.0 - b_i.0;
+                    muls.push(MulSlot { output_wire: *output, a_i, b_i, c_i, d_i, e_i });
+                    state.set_wire(*output, WireValue::Secret, vis.output_visibility());
+                }
+                Instruction::Select { output_vis, condition, then_val, else_val, output } => {
+                    let cond_i = self.my_share(*condition)?;
+                    let tv_i   = self.my_share(*then_val)?;
+                    let ev_i   = self.my_share(*else_val)?;
+                    let diff_i = Share(tv_i.0 - ev_i.0);
+                    let (a_i, b_i, c_i) = self.pop_triple()?;
+                    let d_i = cond_i.0 - a_i.0;
+                    let e_i = diff_i.0 - b_i.0;
+                    selects.push(SelectSlot { output_wire: *output, else_val_i: ev_i, a_i, b_i, c_i, d_i, e_i });
+                    state.set_wire(*output, WireValue::Secret, *output_vis);
+                }
+                other => {
+                    // All linear gates (Add, Sub, Const, MulConst, …) are local.
+                    self.execute_instruction(other, state)?;
+                }
+            }
+        }
+
+        if !muls.is_empty() || !selects.is_empty() {
+            let n_muls    = muls.len() as u32;
+            let n_selects = selects.len() as u32;
+            let total     = (n_muls + n_selects) as usize;
+            let mut msg   = Vec::with_capacity(8 + total * 16);
+            msg.extend_from_slice(&n_muls.to_le_bytes());
+            msg.extend_from_slice(&n_selects.to_le_bytes());
+            for slot in &muls {
+                msg.extend(fr_to_bytes(slot.d_i));
+                msg.extend(fr_to_bytes(slot.e_i));
+            }
+            for slot in &selects {
+                msg.extend(fr_to_bytes(slot.d_i));
+                msg.extend(fr_to_bytes(slot.e_i));
+            }
+            self.broadcast(msg);
+            self.pending = Some(PendingOp::MulBatch { muls, selects });
+        }
+
+        Ok(())
+    }
+
     fn take_outgoing(&mut self) -> Vec<(usize, Vec<u8>)> {
         std::mem::take(&mut self.outgoing)
     }
 
     fn receive_replies(&mut self, messages: Vec<(usize, Vec<u8>)>) -> Result<(), BackendError> {
         match self.pending.take() {
-            // ---- Multiply: reconstruct δ and ε, compute z_i ----
-            Some(PendingOp::Mul { output_wire, a_i, b_i, c_i, d_i, e_i }) => {
-                let n = self.n_parties;
-                let mut d_shares = vec![Share(Fr::from(0u64)); n];
-                let mut e_shares = vec![Share(Fr::from(0u64)); n];
+            // ---- Batched Mul+Select: reconstruct all δ_k, ε_k in one pass ----
+            Some(PendingOp::MulBatch { muls, selects }) => {
+                let n         = self.n_parties;
+                let n_muls    = muls.len();
+                let n_selects = selects.len();
+                let total     = n_muls + n_selects;
 
-                d_shares[self.my_id] = Share(d_i);
-                e_shares[self.my_id] = Share(e_i);
+                // d_shares[k][party] and e_shares[k][party] for slot k.
+                let mut d_shares: Vec<Vec<Share<Fr>>> =
+                    vec![vec![Share(Fr::from(0u64)); n]; total];
+                let mut e_shares: Vec<Vec<Share<Fr>>> =
+                    vec![vec![Share(Fr::from(0u64)); n]; total];
 
-                for (from, msg) in &messages {
-                    if msg.len() < 64 {
-                        return Err(BackendError::BackendError(
-                            "Mul reply too short (expected 64 bytes)".into(),
-                        ));
-                    }
-                    d_shares[*from] = Share(fr_from_bytes(&msg[..32])?);
-                    e_shares[*from] = Share(fr_from_bytes(&msg[32..64])?);
+                // Fill in our own contributions.
+                for (k, slot) in muls.iter().enumerate() {
+                    d_shares[k][self.my_id] = Share(slot.d_i);
+                    e_shares[k][self.my_id] = Share(slot.e_i);
+                }
+                for (k, slot) in selects.iter().enumerate() {
+                    d_shares[n_muls + k][self.my_id] = Share(slot.d_i);
+                    e_shares[n_muls + k][self.my_id] = Share(slot.e_i);
                 }
 
-                let delta = reconstruct_secret(&d_shares)
-                    .map_err(|e| BackendError::BackendError(format!("reconstruct δ: {e:?}")))?;
-                let eta = reconstruct_secret(&e_shares)
-                    .map_err(|e| BackendError::BackendError(format!("reconstruct ε: {e:?}")))?;
-
-                // [z]_i = [c]_i + δ·[b]_i + ε·[a]_i + δ·ε
-                let z_i = c_i.0 + delta * b_i.0 + eta * a_i.0 + delta * eta;
-                self.my_shares.insert(output_wire, Share(z_i));
-            }
-
-            // ---- Select: same Beaver reconstruction as Mul, then add else_val ----
-            Some(PendingOp::Select { output_wire, else_val_i, a_i, b_i, c_i, d_i, e_i }) => {
-                let n = self.n_parties;
-                let mut d_shares = vec![Share(Fr::from(0u64)); n];
-                let mut e_shares = vec![Share(Fr::from(0u64)); n];
-
-                d_shares[self.my_id] = Share(d_i);
-                e_shares[self.my_id] = Share(e_i);
-
+                // Parse peer messages.
                 for (from, msg) in &messages {
-                    if msg.len() < 64 {
+                    if msg.len() < 8 {
                         return Err(BackendError::BackendError(
-                            "Select reply too short (expected 64 bytes)".into(),
+                            "MulBatch reply too short (< 8 bytes header)".into(),
                         ));
                     }
-                    d_shares[*from] = Share(fr_from_bytes(&msg[..32])?);
-                    e_shares[*from] = Share(fr_from_bytes(&msg[32..64])?);
+                    let peer_n_muls    = u32::from_le_bytes(msg[0..4].try_into().unwrap()) as usize;
+                    let peer_n_selects = u32::from_le_bytes(msg[4..8].try_into().unwrap()) as usize;
+                    let peer_total     = peer_n_muls + peer_n_selects;
+                    let expected_len   = 8 + peer_total * 16;
+                    if msg.len() < expected_len {
+                        return Err(BackendError::BackendError(format!(
+                            "MulBatch reply from party {from} too short: {} < {expected_len}",
+                            msg.len()
+                        )));
+                    }
+                    for k in 0..peer_total {
+                        let off = 8 + k * 16;
+                        d_shares[k][*from] = Share(fr_from_bytes(&msg[off..off + 8])?);
+                        e_shares[k][*from] = Share(fr_from_bytes(&msg[off + 8..off + 16])?);
+                    }
                 }
 
-                let delta = reconstruct_secret(&d_shares)
-                    .map_err(|e| BackendError::BackendError(format!("select reconstruct δ: {e:?}")))?;
-                let eta = reconstruct_secret(&e_shares)
-                    .map_err(|e| BackendError::BackendError(format!("select reconstruct ε: {e:?}")))?;
+                // Reconstruct each Mul slot.
+                for (k, slot) in muls.iter().enumerate() {
+                    let delta = reconstruct_secret(&d_shares[k])
+                        .map_err(|e| BackendError::BackendError(format!("reconstruct δ[{k}]: {e:?}")))?;
+                    let eta = reconstruct_secret(&e_shares[k])
+                        .map_err(|e| BackendError::BackendError(format!("reconstruct ε[{k}]: {e:?}")))?;
+                    let z_i = slot.c_i.0 + delta * slot.b_i.0 + eta * slot.a_i.0 + delta * eta;
+                    self.my_shares.insert(slot.output_wire, Share(z_i));
+                }
 
-                // cond_diff_i = c_i + δ·b_i + ε·a_i + δ·ε
-                let cond_diff_i = c_i.0 + delta * b_i.0 + eta * a_i.0 + delta * eta;
-                // result_i = else_val_i + cond_diff_i
-                let result_i = else_val_i.0 + cond_diff_i;
-                self.my_shares.insert(output_wire, Share(result_i));
+                // Reconstruct each Select slot.
+                for (k, slot) in selects.iter().enumerate() {
+                    let delta = reconstruct_secret(&d_shares[n_muls + k])
+                        .map_err(|e| BackendError::BackendError(format!("reconstruct δ_sel[{k}]: {e:?}")))?;
+                    let eta = reconstruct_secret(&e_shares[n_muls + k])
+                        .map_err(|e| BackendError::BackendError(format!("reconstruct ε_sel[{k}]: {e:?}")))?;
+                    let cond_diff_i = slot.c_i.0 + delta * slot.b_i.0 + eta * slot.a_i.0 + delta * eta;
+                    let result_i = slot.else_val_i.0 + cond_diff_i;
+                    self.my_shares.insert(slot.output_wire, Share(result_i));
+                }
             }
 
             // ---- Output reconstruction: collect shares, reconstruct ----
@@ -518,13 +496,13 @@ impl Backend for BgwNetBackend {
                     all[self.my_id] = self.my_share(wire)?;
 
                     for (from, msg) in &messages {
-                        let offset = wire_idx * 32;
-                        if msg.len() < offset + 32 {
+                        let offset = wire_idx * 8;
+                        if msg.len() < offset + 8 {
                             return Err(BackendError::BackendError(
                                 "output reply too short".into(),
                             ));
                         }
-                        all[*from] = Share(fr_from_bytes(&msg[offset..offset + 32])?);
+                        all[*from] = Share(fr_from_bytes(&msg[offset..offset + 8])?);
                     }
 
                     let secret = reconstruct_secret(&all)
@@ -550,7 +528,7 @@ impl Backend for BgwNetBackend {
         _state: &VMState,
     ) -> Result<(), BackendError> {
         // Pack all my output shares into one message, broadcast to every peer.
-        let mut msg = Vec::with_capacity(wires.len() * 32);
+        let mut msg = Vec::with_capacity(wires.len() * 8);
         for &wire in wires {
             msg.extend(fr_to_bytes(self.my_share(wire)?.0));
         }
@@ -565,19 +543,6 @@ impl Backend for BgwNetBackend {
             .get(&wire)
             .copied()
             .ok_or(BackendError::WireNotSet(wire))?;
-
-        // Homomorphic output check: if the commitment chain survived (no Mul gate
-        // between input and output), verify v·G == stored commitment.
-        if let Some(&Some(expected)) = self.wire_commit.get(&wire) {
-            let actual = commit::constant_commit(u64_to_field::<Fr>(v));
-            if actual != expected {
-                return Err(BackendError::BackendError(format!(
-                    "output commitment mismatch on wire {:?}: \
-                     homomorphic verification failed (wire may have been tampered with)",
-                    wire
-                )));
-            }
-        }
 
         Ok(v)
     }
@@ -598,7 +563,7 @@ pub fn count_multiplications(program: &ir::lir::Program) -> usize {
 
 /// Dealer (party 0): generate `n_triples` Beaver triples with `OsRng` and
 /// return one serialised blob per party.  Blob `i` contains
-/// `([a]_i ‖ [b]_i ‖ [c]_i)` for each triple — 96 bytes per triple.
+/// `([a]_i ‖ [b]_i ‖ [c]_i)` for each triple — 24 bytes per triple.
 /// Send `blobs[i]` to party `i` (keep `blobs[my_id]` locally).
 pub fn dealer_generate_triple_blobs(
     n_triples: usize,
@@ -608,7 +573,7 @@ pub fn dealer_generate_triple_blobs(
     use crate::ops::generate_beaver_triple;
     use ark_std::rand::rngs::OsRng;
 
-    let mut blobs: Vec<Vec<u8>> = vec![Vec::with_capacity(n_triples * 96); n_parties];
+    let mut blobs: Vec<Vec<u8>> = vec![Vec::with_capacity(n_triples * 24); n_parties];
     let mut rng = OsRng;
 
     for _ in 0..n_triples {
@@ -624,21 +589,21 @@ pub fn dealer_generate_triple_blobs(
 }
 
 /// Parse a blob received from the dealer into a vector of triple shares.
-/// Each 96-byte chunk is one `([a]_i, [b]_i, [c]_i)`.
+/// Each 24-byte chunk is one `([a]_i, [b]_i, [c]_i)`.
 pub fn parse_triple_blob(
     blob: &[u8],
 ) -> Result<Vec<(Share<Fr>, Share<Fr>, Share<Fr>)>, BackendError> {
-    if blob.len() % 96 != 0 {
+    if blob.len() % 24 != 0 {
         return Err(BackendError::BackendError(format!(
-            "triple blob length {} is not a multiple of 96",
+            "triple blob length {} is not a multiple of 24",
             blob.len()
         )));
     }
-    blob.chunks_exact(96)
+    blob.chunks_exact(24)
         .map(|chunk| {
-            let a = Share(fr_from_bytes(&chunk[..32])?);
-            let b = Share(fr_from_bytes(&chunk[32..64])?);
-            let c = Share(fr_from_bytes(&chunk[64..96])?);
+            let a = Share(fr_from_bytes(&chunk[..8])?);
+            let b = Share(fr_from_bytes(&chunk[8..16])?);
+            let c = Share(fr_from_bytes(&chunk[16..24])?);
             Ok((a, b, c))
         })
         .collect()
@@ -784,10 +749,9 @@ mod tests {
         assert_eq!(t2.await.unwrap()[0].1, 35);
     }
 
-    /// 3-party BGW: pure-add circuit `a + b` — no Mul, so the commitment chain
-    /// stays intact and the homomorphic output check fires silently.
+    /// 3-party BGW: pure-add circuit `a + b` — no Mul needed, only local addition.
     #[tokio::test]
-    async fn three_party_bgw_add_homomorphic_check() {
+    async fn three_party_bgw_add_only() {
         let mut builder = CircuitBuilder::new();
         let w0 = builder.add_input(Visibility::Secret, Some("a".into()));
         let w1 = builder.add_input(Visibility::Secret, Some("b".into()));
@@ -823,40 +787,9 @@ mod tests {
             Runner::new(net2, b2, p2, &mk(None, None)).unwrap().run().await.unwrap()
         });
 
-        // 11 + 22 = 33 — commitment check passed (no error) means homomorphic
-        // verification succeeded end-to-end.
         assert_eq!(t0.await.unwrap()[0].1, 33);
         assert_eq!(t1.await.unwrap()[0].1, 33);
         assert_eq!(t2.await.unwrap()[0].1, 33);
     }
 
-    /// Tamper test: corrupt a share blob so the Fr value doesn't satisfy the
-    /// Feldman commitment — `receive_input_share` must return an error.
-    #[test]
-    fn feldman_tamper_detected() {
-        // Build a valid blob for party 0 (party_index = 1).
-        let (parties, threshold) = (3, 2);
-        let blobs = dealer_generate_triple_blobs(0, parties, threshold);
-        let mut backend = make_backend(0, parties, threshold, &blobs);
-
-        // Construct a valid blob via share_input so we know the format.
-        let valid_blobs = backend.share_input(WireId(0), 42, parties).unwrap();
-        let mut tampered = valid_blobs[0].clone();
-        // Flip one byte of the Fr share portion to corrupt it.
-        tampered[0] ^= 0xFF;
-
-        let mut state = runtime::vm::VMState::new(1, u64::MAX);
-        let result = backend.receive_input_share(
-            WireId(0),
-            Visibility::Secret,
-            tampered,
-            &mut state,
-        );
-        assert!(
-            result.is_err(),
-            "tampered share should be rejected by Feldman verification"
-        );
-        let err_msg = format!("{:?}", result.unwrap_err());
-        assert!(err_msg.contains("Feldman"), "expected Feldman error, got: {err_msg}");
-    }
 }

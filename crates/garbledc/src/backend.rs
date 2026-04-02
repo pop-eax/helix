@@ -677,8 +677,12 @@ impl YaoBackend {
         );
         self.circuit.garble();
 
-        // Evaluate
-        let results = self.circuit.evaluate(self.input_labels.clone());
+        // Evaluate — use parallel evaluation for circuits up to ~500K binary gates.
+        let results = if self.circuit.gates.len() <= 500_000 {
+            self.circuit.evaluate_parallel(self.input_labels.clone())
+        } else {
+            self.circuit.evaluate(self.input_labels.clone())
+        };
 
         // Decode bit-level results
         let mut processed_wires = std::collections::HashSet::new();
