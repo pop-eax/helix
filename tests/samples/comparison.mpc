@@ -1,5 +1,5 @@
 // Comparison function
-fn is_greater(Public Field<64> a, Public Field<64> b) -> Bool {
+fn is_greater(Public Field<9223372036854775807> a, Public Field<9223372036854775807> b) -> Bool {
     return a > b;
 }
 

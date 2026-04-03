@@ -15,3 +15,5 @@
 /verify/dsl-verify/theories/.*.aux
 /verify/dsl-verify/theories/.coq-native/
 /verify/dsl-verify/.coq-native/
+
+*.ir

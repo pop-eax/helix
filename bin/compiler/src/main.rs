@@ -118,9 +118,10 @@ fn compile(input: PathBuf, output: Option<PathBuf>) -> Result<(), FrontendError>
     
     // Parse, type check, and generate HIR
     let hir = parse_and_codegen(&source)?;
-    
+
     // Lower to LIR
-    let metadata = create_metadata(&input);
+    let field_modulus = extract_field_modulus(&source);
+    let metadata = create_metadata(&input, field_modulus);
     let lir = lower_hir_to_lir(&hir, metadata)
         .map_err(|e| FrontendError::LoweringError(e.to_string()))?;
     
@@ -158,8 +159,9 @@ fn show_hir(input: PathBuf) -> Result<(), FrontendError> {
 fn show_lir(input: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(&input)?;
     let hir = parse_and_codegen(&source)?;
-    
-    let metadata = create_metadata(&input);
+
+    let field_modulus = extract_field_modulus(&source);
+    let metadata = create_metadata(&input, field_modulus);
     let lir = lower_hir_to_lir(&hir, metadata)?;
     
     println!("=== LIR ===");
@@ -181,18 +183,20 @@ fn debug_all(input: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     println!();
     
     println!("=== LIR ===");
-    let metadata = create_metadata(&input);
+    let field_modulus = extract_field_modulus(&source);
+    let metadata = create_metadata(&input, field_modulus);
     let lir = lower_hir_to_lir(&hir, metadata).map_err(|e| format!("Lowering error: {}", e))?;
     println!("{}", ir::lir_display::display_lir_program(&lir));
-    
+
     Ok(())
 }
 
 fn compile_to_vm(input: PathBuf, output: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(&input).map_err(|e| format!("IO error: {}", e))?;
     let hir = parse_and_codegen(&source).map_err(|e| format!("Frontend error: {}", e))?;
-    
-    let metadata = create_metadata(&input);
+
+    let field_modulus = extract_field_modulus(&source);
+    let metadata = create_metadata(&input, field_modulus);
     let lir = lower_hir_to_lir(&hir, metadata).map_err(|e| format!("Lowering error: {}", e))?;
     
     let instructions = compile_to_vm_instructions(&lir.circuit);
@@ -212,8 +216,9 @@ fn compile_to_vm(input: PathBuf, output: Option<PathBuf>) -> Result<(), Box<dyn 
 fn execute(input: PathBuf, inputs_str: String) -> Result<(), Box<dyn std::error::Error>> {
     let source = fs::read_to_string(&input).map_err(|e| format!("IO error: {}", e))?;
     let hir = parse_and_codegen(&source).map_err(|e| format!("Frontend error: {}", e))?;
-    
-    let metadata = create_metadata(&input);
+
+    let field_modulus = extract_field_modulus(&source);
+    let metadata = create_metadata(&input, field_modulus);
     let lir = lower_hir_to_lir(&hir, metadata).map_err(|e| format!("Lowering error: {}", e))?;
     
     // Parse input values
@@ -264,12 +269,38 @@ fn execute(input: PathBuf, inputs_str: String) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-fn create_metadata(input: &PathBuf) -> Metadata {
+const DEFAULT_FIELD_MODULUS: u64 = (1u64 << 63) - 1; // Mersenne63
+
+fn extract_field_modulus(source: &str) -> u64 {
+    use frontend::ast::{BaseType, Item, TypeExpr};
+    fn scan_type(ty: &TypeExpr) -> Option<u64> {
+        match ty {
+            TypeExpr::Base(BaseType::Field(f)) => Some(f.modulus),
+            TypeExpr::Array(a) => scan_type(&a.element_type),
+            _ => None,
+        }
+    }
+    parse_and_check(source)
+        .ok()
+        .and_then(|ast| {
+            ast.items.iter().find_map(|item| {
+                if let Item::FunctionDef(f) = item {
+                    f.params.iter().find_map(|p| scan_type(&p.ty))
+                        .or_else(|| scan_type(&f.return_type))
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(DEFAULT_FIELD_MODULUS)
+}
+
+fn create_metadata(input: &PathBuf, field_modulus: u64) -> Metadata {
     Metadata {
         version: "1.0".to_string(),
         source_file: input.display().to_string(),
         function_name: "main".to_string(), // Default, could be extracted from AST
-        field_modulus: Some(2_u64.pow(63) - 1),
+        field_modulus: Some(field_modulus),
         statistics: Statistics {
             total_gates: 0,
             gate_counts: HashMap::new(),

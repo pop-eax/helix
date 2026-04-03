@@ -106,16 +106,33 @@ mod tests {
     use super::*;
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::SeedableRng;
-    use crate::shamir::sample_and_share;
+    use ark_std::UniformRand;
+
+    /// Build a degree-`degree` polynomial with `secret` constant term; return
+    /// (party shares at x=1..=parties, coefficients).
+    fn sample_poly(secret: Fr, degree: usize, parties: usize, rng: &mut StdRng) -> (Vec<Fr>, Vec<Fr>) {
+        let mut coeffs = vec![secret];
+        for _ in 0..degree {
+            coeffs.push(Fr::rand(rng));
+        }
+        let shares = (1..=parties as u64)
+            .map(|x| {
+                let xf = Fr::from(x);
+                let mut x_pow = Fr::from(1u64);
+                coeffs.iter().map(|c| { let t = *c * x_pow; x_pow *= xf; t }).sum()
+            })
+            .collect();
+        (shares, coeffs)
+    }
 
     #[test]
     fn verify_share_accepts_honest_share() {
         let mut rng = StdRng::seed_from_u64(1);
         let secret = Fr::from(42u64);
-        let (shares, coeffs) = sample_and_share(secret, 2, 3, &mut rng).unwrap();
+        let (shares, coeffs) = sample_poly(secret, 2, 3, &mut rng);
         let commits = feldman_commitments(&coeffs);
-        for (i, share) in shares.as_slice().iter().enumerate() {
-            assert!(verify_share(share.0, i + 1, &commits), "party {} failed", i + 1);
+        for (i, share) in shares.iter().enumerate() {
+            assert!(verify_share(*share, i + 1, &commits), "party {} failed", i + 1);
         }
     }
 
@@ -123,7 +140,7 @@ mod tests {
     fn verify_share_rejects_tampered_share() {
         let mut rng = StdRng::seed_from_u64(2);
         let secret = Fr::from(99u64);
-        let (_, coeffs) = sample_and_share(secret, 2, 3, &mut rng).unwrap();
+        let (_, coeffs) = sample_poly(secret, 2, 3, &mut rng);
         let commits = feldman_commitments(&coeffs);
         let bad_share = Fr::from(0u64);
         assert!(!verify_share(bad_share, 1, &commits));

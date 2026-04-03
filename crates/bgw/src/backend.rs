@@ -1,14 +1,18 @@
-use crate::field::{field_to_u64_checked, u64_to_field};
 use crate::ir::{BgwNodeId, BgwOp, BgwProgram};
 use crate::lowering::lower_instruction;
 use crate::ops::{add_shares, multiply_shares, sub_shares};
+use crate::runtime_field::PrimeField;
 use crate::shamir::{reconstruct_secret, share_secret};
 use crate::types::{PartyShares, Share};
-use crate::mersenne_field::Mersenne63 as Fr;
 use ir::lir::WireId;
+use rand::rngs::OsRng;
+use rand::Rng;
 use runtime::vm::{Backend, BackendError, Instruction, VMState, WireValue};
 use runtime::Visibility;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+
+const MERSENNE63: u64 = (1u64 << 63) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BgwConfig {
@@ -19,16 +23,18 @@ pub struct BgwConfig {
 #[derive(Debug)]
 pub struct BgwBackend {
     config: BgwConfig,
+    field: PrimeField,
     program: BgwProgram,
-    wire_shares: HashMap<WireId, PartyShares<Fr>>,
-    node_values: HashMap<BgwNodeId, PartyShares<Fr>>,
+    wire_shares: HashMap<WireId, PartyShares>,
+    node_values: HashMap<BgwNodeId, PartyShares>,
     output_cache: HashMap<WireId, u64>,
     executed: bool,
-    rng: ark_std::rand::rngs::OsRng,
+    use_commits: bool,
+    rng: OsRng,
 }
 
 impl BgwBackend {
-    pub fn new(config: BgwConfig) -> Result<Self, BackendError> {
+    pub fn new(config: BgwConfig, field: PrimeField) -> Result<Self, BackendError> {
         if config.parties == 0 {
             return Err(BackendError::BackendError(
                 "Invalid BGW config: parties must be > 0".to_string(),
@@ -47,24 +53,33 @@ impl BgwBackend {
 
         Ok(Self {
             config,
+            field,
             program: BgwProgram::default(),
             wire_shares: HashMap::new(),
             node_values: HashMap::new(),
             output_cache: HashMap::new(),
             executed: false,
-            rng: ark_std::rand::rngs::OsRng,
+            use_commits: false,
+            rng: OsRng,
         })
+    }
+
+    /// Enable SHA256 commitment to input shares.
+    pub fn with_commits(mut self) -> Self {
+        self.use_commits = true;
+        self
     }
 
     fn arithmetic_error<E: core::fmt::Debug>(context: &str, err: E) -> BackendError {
         BackendError::ArithmeticError(format!("BGW {} failed: {:?}", context, err))
     }
 
-    fn constant_shares(&self, value: Fr) -> PartyShares<Fr> {
-        let shares: Vec<Share<Fr>> = (0..self.config.parties)
-            .map(|_| Share(value))
-            .collect();
-        PartyShares::new(shares)
+    fn constant_shares(&self, value: u64) -> PartyShares {
+        PartyShares::new(
+            (0..self.config.parties)
+                .map(|_| Share(value))
+                .collect(),
+        )
     }
 
     fn execute_program_once(&mut self) -> Result<(), BackendError> {
@@ -80,7 +95,9 @@ impl BgwBackend {
                     .get(&wire)
                     .cloned()
                     .ok_or(BackendError::WireNotSet(wire))?,
-                BgwOp::Const { value } => self.constant_shares(value),
+                BgwOp::Const { value } => {
+                    self.constant_shares(self.field.from_u64(value))
+                }
                 BgwOp::Add { a, b } => {
                     let av = self.node_values.get(&a).ok_or_else(|| {
                         BackendError::BackendError(format!("Missing node value {:?}", a))
@@ -88,7 +105,7 @@ impl BgwBackend {
                     let bv = self.node_values.get(&b).ok_or_else(|| {
                         BackendError::BackendError(format!("Missing node value {:?}", b))
                     })?;
-                    add_shares(av.as_slice(), bv.as_slice())
+                    add_shares(av.as_slice(), bv.as_slice(), &self.field)
                         .map_err(|e| Self::arithmetic_error("add", e))?
                 }
                 BgwOp::Sub { a, b } => {
@@ -98,7 +115,7 @@ impl BgwBackend {
                     let bv = self.node_values.get(&b).ok_or_else(|| {
                         BackendError::BackendError(format!("Missing node value {:?}", b))
                     })?;
-                    sub_shares(av.as_slice(), bv.as_slice())
+                    sub_shares(av.as_slice(), bv.as_slice(), &self.field)
                         .map_err(|e| Self::arithmetic_error("sub", e))?
                 }
                 BgwOp::Mul { a, b } => {
@@ -112,6 +129,7 @@ impl BgwBackend {
                         av.as_slice(),
                         bv.as_slice(),
                         self.config.threshold,
+                        &self.field,
                         &mut self.rng,
                     )
                     .map_err(|e| Self::arithmetic_error("mul", e))?
@@ -154,9 +172,7 @@ impl Backend for BgwBackend {
             | Instruction::Sub { vis, output, .. } => {
                 state.set_wire(*output, WireValue::Secret, vis.output_visibility());
             }
-            Instruction::Constant {
-                output, visibility, ..
-            } => {
+            Instruction::Constant { output, visibility, .. } => {
                 state.set_wire(*output, WireValue::Secret, *visibility);
             }
             Instruction::AddConstant { vis, output, .. }
@@ -173,7 +189,6 @@ impl Backend for BgwBackend {
                 ));
             }
             Instruction::Select { output_vis, output, .. } => {
-                // lower_instruction already expanded select into Sub+Mul+Add BGW ops.
                 state.set_wire(*output, WireValue::Secret, *output_vis);
             }
         }
@@ -192,15 +207,127 @@ impl Backend for BgwBackend {
         visibility: Visibility,
         state: &mut VMState,
     ) -> Result<(), BackendError> {
+        let reduced = self.field.from_u64(value);
         let shares = share_secret(
-            u64_to_field::<Fr>(value),
+            reduced,
             self.config.threshold,
             self.config.parties,
+            &self.field,
             &mut self.rng,
         )
         .map_err(|e| Self::arithmetic_error("share input", e))?;
 
         self.wire_shares.insert(wire, shares);
+        state.set_wire(wire, WireValue::Secret, visibility);
+        Ok(())
+    }
+
+    fn share_input(
+        &mut self,
+        wire: WireId,
+        value: u64,
+        n_parties: usize,
+    ) -> Result<Vec<Vec<u8>>, BackendError> {
+        let reduced = self.field.from_u64(value);
+        let shares = share_secret(
+            reduced,
+            self.config.threshold,
+            n_parties,
+            &self.field,
+            &mut self.rng,
+        )
+        .map_err(|e| Self::arithmetic_error("share input", e))?;
+
+        if !self.use_commits {
+            // Plain 8-byte share blobs.
+            return Ok(shares
+                .as_slice()
+                .iter()
+                .map(|s| PrimeField::to_bytes(s.0).to_vec())
+                .collect());
+        }
+
+        // Build commit blobs: [share (8)] || [nonce (32)] || [C_0 (32)] || … || [C_{n-1} (32)]
+        let mut nonces: Vec<[u8; 32]> = Vec::with_capacity(n_parties);
+        let mut commits: Vec<[u8; 32]> = Vec::with_capacity(n_parties);
+        for s in shares.as_slice() {
+            let mut nonce = [0u8; 32];
+            self.rng.fill(&mut nonce);
+            let share_bytes = PrimeField::to_bytes(s.0);
+            let mut h = Sha256::new();
+            h.update(share_bytes);
+            h.update(nonce);
+            let c: [u8; 32] = h.finalize().into();
+            nonces.push(nonce);
+            commits.push(c);
+        }
+
+        let commit_bytes: Vec<u8> = commits.iter().flat_map(|c| c.iter().copied()).collect();
+        Ok(shares
+            .as_slice()
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let mut blob = Vec::with_capacity(8 + 32 + 32 * n_parties);
+                blob.extend(PrimeField::to_bytes(s.0));
+                blob.extend(nonces[i]);
+                blob.extend(&commit_bytes);
+                blob
+            })
+            .collect())
+    }
+
+    fn receive_input_share(
+        &mut self,
+        wire: WireId,
+        visibility: Visibility,
+        share: Vec<u8>,
+        state: &mut VMState,
+    ) -> Result<(), BackendError> {
+        if share.len() < 8 {
+            return Err(BackendError::BackendError(
+                "share blob too short".into(),
+            ));
+        }
+        let share_val = PrimeField::from_bytes(&share[..8])?;
+
+        // If commits are present (blob > 8 bytes), verify.
+        if share.len() > 8 {
+            if share.len() < 40 {
+                return Err(BackendError::BackendError(
+                    "commit blob too short for nonce".into(),
+                ));
+            }
+            let nonce = &share[8..40];
+            let commits_data = &share[40..];
+            // Each commit is 32 bytes; figure out my party's commit.
+            let n_parties = commits_data.len() / 32;
+            let my_id = self.config.parties; // BgwBackend doesn't have my_id; use 0 for single-process
+            let idx = if my_id < n_parties { my_id } else { 0 };
+            if commits_data.len() < (idx + 1) * 32 {
+                return Err(BackendError::BackendError(
+                    "commit blob missing commit for this party".into(),
+                ));
+            }
+            let expected_commit = &commits_data[idx * 32..(idx + 1) * 32];
+            let mut h = Sha256::new();
+            h.update(&share[..8]);
+            h.update(nonce);
+            let actual: [u8; 32] = h.finalize().into();
+            if actual.as_slice() != expected_commit {
+                return Err(BackendError::BackendError(format!(
+                    "input share commitment mismatch for wire {:?}",
+                    wire
+                )));
+            }
+        }
+
+        // In single-process mode all parties hold the same share-set; here we just
+        // store directly. The networked backend handles per-party storage.
+        let share_obj = PartyShares::new(vec![Share(share_val)]);
+        // We need a full PartyShares for the circuit; set_input handles real sharing.
+        // For receive_input_share in single-process BGW, update the wire state only.
+        let _ = share_obj;
         state.set_wire(wire, WireValue::Secret, visibility);
         Ok(())
     }
@@ -212,12 +339,10 @@ impl Backend for BgwBackend {
 
         self.execute_program_once()?;
         let shares = self.wire_shares.get(&wire).ok_or(BackendError::WireNotSet(wire))?;
-        let secret = reconstruct_secret(shares.as_slice())
+        let secret = reconstruct_secret(shares.as_slice(), &self.field)
             .map_err(|e| Self::arithmetic_error("reconstruct", e))?;
-        let value = field_to_u64_checked(secret)
-            .map_err(|e| Self::arithmetic_error("u64 conversion", e))?;
-        self.output_cache.insert(wire, value);
-        Ok(value)
+        self.output_cache.insert(wire, secret);
+        Ok(secret)
     }
 }
 
@@ -262,6 +387,14 @@ mod tests {
         }
     }
 
+    fn default_backend(parties: usize, threshold: usize) -> BgwBackend {
+        BgwBackend::new(
+            BgwConfig { parties, threshold },
+            PrimeField::mersenne63(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn backend_accepts_inputs_and_runs_lowered_arithmetic_program() {
         let program = mk_program(
@@ -289,11 +422,7 @@ mod tests {
             vec![WireId(5)],
         );
 
-        let mut backend = BgwBackend::new(BgwConfig {
-            parties: 5,
-            threshold: 3,
-        })
-        .unwrap();
+        let mut backend = default_backend(5, 3);
 
         let out = execute_program(
             &program,
@@ -336,11 +465,7 @@ mod tests {
             vec![WireId(4)],
         );
 
-        let mut backend = BgwBackend::new(BgwConfig {
-            parties: 5,
-            threshold: 3,
-        })
-        .unwrap();
+        let mut backend = default_backend(5, 3);
 
         let out = execute_program(
             &program,
@@ -354,11 +479,8 @@ mod tests {
 
     #[test]
     fn backend_invalid_config_errors() {
-        let err = BgwBackend::new(BgwConfig {
-            parties: 2,
-            threshold: 3,
-        })
-        .unwrap_err();
+        let err = BgwBackend::new(BgwConfig { parties: 2, threshold: 3 }, PrimeField::mersenne63())
+            .unwrap_err();
         assert!(format!("{}", err).contains("threshold"));
     }
 }

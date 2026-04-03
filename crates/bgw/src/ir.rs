@@ -1,4 +1,3 @@
-use crate::mersenne_field::Mersenne63 as Fr;
 use ir::lir::WireId;
 use std::collections::HashMap;
 
@@ -8,7 +7,7 @@ pub struct BgwNodeId(pub usize);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BgwOp {
     Input { wire: WireId },
-    Const { value: Fr },
+    Const { value: u64 },
     Add { a: BgwNodeId, b: BgwNodeId },
     Sub { a: BgwNodeId, b: BgwNodeId },
     Mul { a: BgwNodeId, b: BgwNodeId },

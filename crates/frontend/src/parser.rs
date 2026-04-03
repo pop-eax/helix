@@ -161,14 +161,13 @@ fn parse_base_type(pair: Pair<Rule>) -> Result<BaseType, String> {
 
 fn parse_field_type(pair: Pair<Rule>) -> Result<FieldType, String> {
     let mut inner = pair.into_inner();
-    // Skip "Field" and "<"
-    let size_str = inner
+    let modulus_str = inner
         .find(|p| p.as_rule() == Rule::integer)
-        .ok_or("Missing size in Field type")?
+        .ok_or("Missing modulus in Field type")?
         .as_str();
-    let size = size_str.parse().map_err(|_| "Invalid integer in Field type")?;
-    
-    Ok(FieldType { size })
+    let modulus = modulus_str.parse().map_err(|_| "Invalid integer in Field type")?;
+
+    Ok(FieldType { modulus })
 }
 
 fn parse_array_type(pair: Pair<Rule>) -> Result<ArrayType, String> {

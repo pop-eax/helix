@@ -10,10 +10,10 @@
 // Example (clear):
 //   runner dot_product.ir -i "1,2,3,4,1,2,3,4" -b clear  => output[0]: 30
 fn dot_product(
-    Secret Field<64> a0, Secret Field<64> a1,
-    Secret Field<64> a2, Secret Field<64> a3,
-    Secret Field<64> b0, Secret Field<64> b1,
-    Secret Field<64> b2, Secret Field<64> b3
-) -> Field<64> {
+    Secret Field<9223372036854775807> a0, Secret Field<9223372036854775807> a1,
+    Secret Field<9223372036854775807> a2, Secret Field<9223372036854775807> a3,
+    Secret Field<9223372036854775807> b0, Secret Field<9223372036854775807> b1,
+    Secret Field<9223372036854775807> b2, Secret Field<9223372036854775807> b3
+) -> Field<9223372036854775807> {
     return a0*b0 + a1*b1 + a2*b2 + a3*b3;
 }

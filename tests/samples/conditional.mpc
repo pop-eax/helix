@@ -1,5 +1,5 @@
 // Conditional computation
-fn max(Public Field<64> a, Public Field<64> b) -> Field<64> {
+fn max(Public Field<9223372036854775807> a, Public Field<9223372036854775807> b) -> Field<9223372036854775807> {
     if a > b {
         return a;
     } else {

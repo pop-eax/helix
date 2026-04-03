@@ -71,7 +71,7 @@ pub enum BaseType {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldType {
-    pub size: u64,
+    pub modulus: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

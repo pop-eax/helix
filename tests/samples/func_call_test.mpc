@@ -6,15 +6,15 @@
 // Example (clear):
 //   runner func_call_test.ir -i "2,3,1,4,5,2" -b clear
 //   => (2*3+1) + (4*5+2) = 7 + 22 = 29
-fn inner(Secret Field<64> a, Secret Field<64> b, Secret Field<64> c) -> Field<64> {
+fn inner(Secret Field<9223372036854775807> a, Secret Field<9223372036854775807> b, Secret Field<9223372036854775807> c) -> Field<9223372036854775807> {
     return a * b + c;
 }
 
 fn outer(
-    Secret Field<64> a, Secret Field<64> b, Secret Field<64> c,
-    Secret Field<64> d, Secret Field<64> e, Secret Field<64> f
-) -> Field<64> {
-    let Public Field<64> r1 = inner(a, b, c);
-    let Public Field<64> r2 = inner(d, e, f);
+    Secret Field<9223372036854775807> a, Secret Field<9223372036854775807> b, Secret Field<9223372036854775807> c,
+    Secret Field<9223372036854775807> d, Secret Field<9223372036854775807> e, Secret Field<9223372036854775807> f
+) -> Field<9223372036854775807> {
+    let Public Field<9223372036854775807> r1 = inner(a, b, c);
+    let Public Field<9223372036854775807> r2 = inner(d, e, f);
     return r1 + r2;
 }

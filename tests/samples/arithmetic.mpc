@@ -1,7 +1,7 @@
 // Complex arithmetic operations
-fn compute(Public Field<64> a, Public Field<64> b, Public Field<64> c) -> Field<64> {
-    let Public Field<64> temp = a * b;
-    let Public Field<64> result = temp + c;
+fn compute(Public Field<9223372036854775807> a, Public Field<9223372036854775807> b, Public Field<9223372036854775807> c) -> Field<9223372036854775807> {
+    let Public Field<9223372036854775807> temp = a * b;
+    let Public Field<9223372036854775807> result = temp + c;
     return result;
 }
 

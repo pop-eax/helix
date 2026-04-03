@@ -1,6 +1,4 @@
-use crate::field::u64_to_field;
 use crate::ir::{BgwNodeId, BgwOp, BgwProgram};
-use crate::mersenne_field::Mersenne63 as Fr;
 use ir::lir::WireId;
 use runtime::vm::{BackendError, Instruction};
 
@@ -14,9 +12,7 @@ pub fn ensure_input_node(program: &mut BgwProgram, wire: WireId) -> BgwNodeId {
 }
 
 pub fn lower_constant(program: &mut BgwProgram, output: WireId, value: u64) -> BgwNodeId {
-    let node = program.push_node(BgwOp::Const {
-        value: u64_to_field::<Fr>(value),
-    });
+    let node = program.push_node(BgwOp::Const { value });
     program.set_wire_node(output, node);
     node
 }
@@ -72,9 +68,7 @@ fn lower_mul(
 
 fn lower_not(program: &mut BgwProgram, input: WireId, output: WireId) -> Result<(), BackendError> {
     ensure_input_node(program, input);
-    let one = program.push_node(BgwOp::Const {
-        value: u64_to_field::<Fr>(1),
-    });
+    let one = program.push_node(BgwOp::Const { value: 1 });
     let x = get_wire_node(program, input)?;
     let out = program.push_node(BgwOp::Sub { a: one, b: x });
     program.set_wire_node(output, out);
@@ -102,14 +96,9 @@ fn lower_xor(
     let b = get_wire_node(program, input2)?;
     let add = program.push_node(BgwOp::Add { a, b });
     let mul = program.push_node(BgwOp::Mul { a, b });
-    let two = program.push_node(BgwOp::Const {
-        value: u64_to_field::<Fr>(2),
-    });
+    let two = program.push_node(BgwOp::Const { value: 2 });
     let two_mul = program.push_node(BgwOp::Mul { a: two, b: mul });
-    let out = program.push_node(BgwOp::Sub {
-        a: add,
-        b: two_mul,
-    });
+    let out = program.push_node(BgwOp::Sub { a: add, b: two_mul });
     program.set_wire_node(output, out);
     Ok(())
 }
@@ -140,9 +129,7 @@ fn lower_add_constant(
 ) -> Result<(), BackendError> {
     ensure_input_node(program, input);
     let x = get_wire_node(program, input)?;
-    let c = program.push_node(BgwOp::Const {
-        value: u64_to_field::<Fr>(constant),
-    });
+    let c = program.push_node(BgwOp::Const { value: constant });
     let out = program.push_node(BgwOp::Add { a: x, b: c });
     program.set_wire_node(output, out);
     Ok(())
@@ -156,9 +143,7 @@ fn lower_sub_constant(
 ) -> Result<(), BackendError> {
     ensure_input_node(program, input);
     let x = get_wire_node(program, input)?;
-    let c = program.push_node(BgwOp::Const {
-        value: u64_to_field::<Fr>(constant),
-    });
+    let c = program.push_node(BgwOp::Const { value: constant });
     let out = program.push_node(BgwOp::Sub { a: x, b: c });
     program.set_wire_node(output, out);
     Ok(())
@@ -172,9 +157,7 @@ fn lower_mul_constant(
 ) -> Result<(), BackendError> {
     ensure_input_node(program, input);
     let x = get_wire_node(program, input)?;
-    let c = program.push_node(BgwOp::Const {
-        value: u64_to_field::<Fr>(constant),
-    });
+    let c = program.push_node(BgwOp::Const { value: constant });
     let out = program.push_node(BgwOp::Mul { a: x, b: c });
     program.set_wire_node(output, out);
     Ok(())
@@ -185,78 +168,52 @@ pub fn lower_instruction(
     instruction: &Instruction,
 ) -> Result<(), BackendError> {
     match instruction {
-        Instruction::And {
-            input1,
-            input2,
-            output,
-            ..
-        } => lower_and(program, *input1, *input2, *output),
-        Instruction::Xor {
-            input1,
-            input2,
-            output,
-            ..
-        } => lower_xor(program, *input1, *input2, *output),
-        Instruction::Or {
-            input1,
-            input2,
-            output,
-            ..
-        } => lower_or(program, *input1, *input2, *output),
+        Instruction::And { input1, input2, output, .. } => {
+            lower_and(program, *input1, *input2, *output)
+        }
+        Instruction::Xor { input1, input2, output, .. } => {
+            lower_xor(program, *input1, *input2, *output)
+        }
+        Instruction::Or { input1, input2, output, .. } => {
+            lower_or(program, *input1, *input2, *output)
+        }
         Instruction::Not { input, output, .. } => lower_not(program, *input, *output),
-        Instruction::Add {
-            input1,
-            input2,
-            output,
-            ..
-        } => lower_add(program, *input1, *input2, *output),
-        Instruction::Sub {
-            input1,
-            input2,
-            output,
-            ..
-        } => lower_sub(program, *input1, *input2, *output),
-        Instruction::Mul {
-            input1,
-            input2,
-            output,
-            ..
-        } => lower_mul(program, *input1, *input2, *output),
+        Instruction::Add { input1, input2, output, .. } => {
+            lower_add(program, *input1, *input2, *output)
+        }
+        Instruction::Sub { input1, input2, output, .. } => {
+            lower_sub(program, *input1, *input2, *output)
+        }
+        Instruction::Mul { input1, input2, output, .. } => {
+            lower_mul(program, *input1, *input2, *output)
+        }
         Instruction::Constant { value, output, .. } => {
             lower_constant(program, *output, *value);
             Ok(())
         }
-        Instruction::AddConstant {
-            input,
-            constant,
-            output,
-            ..
-        } => lower_add_constant(program, *input, *constant, *output),
-        Instruction::MulConstant {
-            input,
-            constant,
-            output,
-            ..
-        } => lower_mul_constant(program, *input, *constant, *output),
-        Instruction::SubConstant {
-            input,
-            constant,
-            output,
-            ..
-        } => lower_sub_constant(program, *input, *constant, *output),
+        Instruction::AddConstant { input, constant, output, .. } => {
+            lower_add_constant(program, *input, *constant, *output)
+        }
+        Instruction::MulConstant { input, constant, output, .. } => {
+            lower_mul_constant(program, *input, *constant, *output)
+        }
+        Instruction::SubConstant { input, constant, output, .. } => {
+            lower_sub_constant(program, *input, *constant, *output)
+        }
         Instruction::Div { .. } => Err(BackendError::BackendError(
             "Instruction Div is unsupported in BGW backend v1".to_string(),
         )),
         Instruction::Mod { .. } => Err(BackendError::BackendError(
             "Instruction Mod is unsupported in BGW backend v1".to_string(),
         )),
-        Instruction::LessThan { .. } | Instruction::Equal { .. } => Err(BackendError::BackendError(
-            "comparison gates require the Yao backend (garbled circuits); \
-             not supported in arithmetic BGW MPC"
-                .to_string(),
-        )),
+        Instruction::LessThan { .. } | Instruction::Equal { .. } => {
+            Err(BackendError::BackendError(
+                "comparison gates require the Yao backend (garbled circuits); \
+                 not supported in arithmetic BGW MPC"
+                    .to_string(),
+            ))
+        }
         // Select: output = else_val + condition * (then_val - else_val)
-        // All operations are over the field, so this is exact and secret-compatible.
         Instruction::Select { condition, then_val, else_val, output, .. } => {
             ensure_input_node(program, *condition);
             ensure_input_node(program, *then_val);
@@ -264,11 +221,8 @@ pub fn lower_instruction(
             let cond = get_wire_node(program, *condition)?;
             let tv = get_wire_node(program, *then_val)?;
             let ev = get_wire_node(program, *else_val)?;
-            // diff = then_val - else_val
             let diff = program.push_node(BgwOp::Sub { a: tv, b: ev });
-            // cond_diff = condition * diff
             let cond_diff = program.push_node(BgwOp::Mul { a: cond, b: diff });
-            // result = else_val + cond_diff
             let result = program.push_node(BgwOp::Add { a: ev, b: cond_diff });
             program.set_wire_node(*output, result);
             Ok(())

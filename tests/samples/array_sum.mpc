@@ -4,8 +4,8 @@
 //
 // Example:
 //   runner array_sum.ir -i "1,2,3,4" -b clear   => output[0]: 10
-fn array_sum(Secret Array<Field<64>, 4> arr) -> Field<64> {
-    let Public Field<64> s = 0;
+fn array_sum(Secret Array<Field<9223372036854775807>, 4> arr) -> Field<9223372036854775807> {
+    let Public Field<9223372036854775807> s = 0;
     for i in 0..4 {
         s = s + arr[i];
     }

@@ -9,6 +9,6 @@
 // Example:
 //   runner millionaire.ir -i "300,200" -b yao   => output[0]: 1
 //   runner millionaire.ir -i "100,200" -b yao   => output[0]: 0
-fn millionaire(Secret Field<64> alice, Secret Field<64> bob) -> Bool {
+fn millionaire(Secret Field<9223372036854775807> alice, Secret Field<9223372036854775807> bob) -> Bool {
     return alice > bob;
 }

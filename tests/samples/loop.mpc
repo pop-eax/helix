@@ -1,6 +1,6 @@
 // Sum using a loop
-fn sum(Public Field<64> n) -> Field<64> {
-    let Public Field<64> result = 0;
+fn sum(Public Field<9223372036854775807> n) -> Field<9223372036854775807> {
+    let Public Field<9223372036854775807> result = 0;
     for i in 0..n {
         result = result + i;
     }

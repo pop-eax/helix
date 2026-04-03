@@ -950,7 +950,7 @@ impl Codegen {
     fn convert_type(&self, ty: &TypeExpr) -> CodegenResult<HirType> {
         match ty {
             TypeExpr::Base(base) => match base {
-                BaseType::Field(field) => Ok(HirType::Field { size: field.size }),
+                BaseType::Field(field) => Ok(HirType::Field { size: field.modulus }),
                 BaseType::Bool => Ok(HirType::Bool),
             },
             TypeExpr::Array(arr) => Ok(HirType::Array {
@@ -1010,7 +1010,7 @@ mod tests {
 
     #[test]
     fn test_codegen_simple_function() {
-        let source = "fn add(Public Field<64> a, Public Field<64> b) -> Field<64> { return a + b; }";
+        let source = "fn add(Public Field<9223372036854775807> a, Public Field<9223372036854775807> b) -> Field<9223372036854775807> { return a + b; }";
         let result = parse_type_check_and_codegen(source);
         assert!(result.is_ok());
         
@@ -1021,14 +1021,14 @@ mod tests {
 
     #[test]
     fn test_codegen_arithmetic_operations() {
-        let source = "fn compute(Public Field<64> a, Public Field<64> b) -> Field<64> { return a + b * 2; }";
+        let source = "fn compute(Public Field<9223372036854775807> a, Public Field<9223372036854775807> b) -> Field<9223372036854775807> { return a + b * 2; }";
         let result = parse_type_check_and_codegen(source);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_codegen_conditional() {
-        let source = "fn max(Public Field<64> a, Public Field<64> b) -> Field<64> { if a > b { return a; } else { return b; } }";
+        let source = "fn max(Public Field<9223372036854775807> a, Public Field<9223372036854775807> b) -> Field<9223372036854775807> { if a > b { return a; } else { return b; } }";
         let result = parse_type_check_and_codegen(source);
         assert!(result.is_ok());
     }

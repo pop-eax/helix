@@ -268,10 +268,10 @@ impl TypeChecker {
 
     fn check_for_loop(&mut self, for_loop: &ForLoop) -> TypeCheckResult<()> {
         self.enter_scope();
-        // Register loop variable as a Field<64> constant (loop indices are integers).
+        // Register loop variable as a Field<9223372036854775807> constant (loop indices are integers).
         self.declare_variable(
             for_loop.var_name.clone(),
-            TypeExpr::Base(BaseType::Field(FieldType { size: 64 })),
+            TypeExpr::Base(BaseType::Field(FieldType { modulus: (1u64 << 63) - 1 })),
             Visibility::Public,
         );
         self.check_block(&for_loop.body)?;
@@ -359,9 +359,9 @@ impl TypeChecker {
         match lit {
             Literal::Integer(_) => {
                 // Integers are represented as Field<size> in MPC
-                // For now, we'll use Field<64> as default for integer literals
+                // For now, we'll use Field<9223372036854775807> as default for integer literals
                 // This might need adjustment based on IR requirements
-                Ok(TypeExpr::Base(BaseType::Field(FieldType { size: 64 })))
+                Ok(TypeExpr::Base(BaseType::Field(FieldType { modulus: (1u64 << 63) - 1 })))
             }
             Literal::Bool(_) => Ok(TypeExpr::Base(BaseType::Bool)),
         }
@@ -666,7 +666,7 @@ impl TypeChecker {
             (TypeExpr::Base(BaseType::Field(f1)), TypeExpr::Base(BaseType::Field(f2))) => {
                 // Field types with different sizes might be compatible depending on IR rules
                 // For now, we'll require exact match
-                f1.size == f2.size
+                f1.modulus == f2.modulus
             }
             (TypeExpr::Array(a1), TypeExpr::Array(a2)) => {
                 self.types_compatible(&a1.element_type, &a2.element_type) && a1.size == a2.size
@@ -687,7 +687,7 @@ impl TypeChecker {
     fn type_to_string(&self, ty: &TypeExpr) -> String {
         match ty {
             TypeExpr::Base(BaseType::Bool) => "Bool".to_string(),
-            TypeExpr::Base(BaseType::Field(f)) => format!("Field<{}>", f.size),
+            TypeExpr::Base(BaseType::Field(f)) => format!("Field<{}>", f.modulus),
             TypeExpr::Array(arr) => format!("Array<{}, {}>", self.type_to_string(&arr.element_type), arr.size),
             TypeExpr::Struct(s) => s.name.clone(),
         }
@@ -737,14 +737,14 @@ mod tests {
 
     #[test]
     fn test_type_check_valid_function() {
-        let source = "fn add(Public Field<64> a, Public Field<64> b) -> Field<64> { return a + b; }";
+        let source = "fn add(Public Field<9223372036854775807> a, Public Field<9223372036854775807> b) -> Field<9223372036854775807> { return a + b; }";
         let result = parse_and_type_check(source);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_type_check_type_mismatch() {
-        let source = "fn test(Public Field<64> a) -> Bool { return a; }";
+        let source = "fn test(Public Field<9223372036854775807> a) -> Bool { return a; }";
         let result = parse_and_type_check(source);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TypeError::ReturnTypeMismatch { .. }));
@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn test_type_check_undefined_variable() {
-        let source = "fn test() -> Field<64> { return x; }";
+        let source = "fn test() -> Field<9223372036854775807> { return x; }";
         let result = parse_and_type_check(source);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TypeError::UndefinedVariable(_)));
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_type_check_valid_if() {
-        let source = "fn test(Public Field<64> a) -> Field<64> { if a > 0 { return 1; } else { return 0; } }";
+        let source = "fn test(Public Field<9223372036854775807> a) -> Field<9223372036854775807> { if a > 0 { return 1; } else { return 0; } }";
         let result = parse_and_type_check(source);
         assert!(result.is_ok());
     }

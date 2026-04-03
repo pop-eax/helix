@@ -259,7 +259,9 @@ dependencies = [
  "ark-std",
  "ir",
  "net",
+ "rand 0.8.5",
  "runtime",
+ "sha2",
  "tokio",
 ]
 

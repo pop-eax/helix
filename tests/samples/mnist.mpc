@@ -10,7 +10,7 @@
 //
 // Pixel layout: pixels[row*4 + col], rows and cols 0-indexed.
 //
-// Protocol: BGW or Yao (16 secret Field<64> inputs, 1 output)
+// Protocol: BGW or Yao (16 secret Field<9223372036854775807> inputs, 1 output)
 //
 // Example (clear) — bottom-right quadrant bright (pixels 10,11,14,15 = 255):
 //   runner mnist.ir -i "0,0,0,0,0,0,0,0,0,0,255,255,0,0,255,255" -b clear  => 3
@@ -18,7 +18,7 @@
 // Example (clear) — top-left quadrant bright (pixels 0,1,4,5 = 255):
 //   runner mnist.ir -i "255,255,0,0,255,255,0,0,0,0,0,0,0,0,0,0" -b clear  => 0
 
-// ReLU activation for Field<64>.
+// ReLU activation for Field<9223372036854775807>.
 // The runtime uses a prime field with modulus M = 2^63 - 1 = 9223372036854775807.
 // "Negative" values (those that wrapped below zero) satisfy x > M/2,
 // i.e. x >= 4611686018427387904.  Positive values are below that threshold.
@@ -26,7 +26,7 @@
 // are at most 4 * 64 * 255 = 65280, safely below M/2, so relu is effectively
 // identity here — but the Select gate is still generated, exercising that
 // code path through the compiler and backend.
-fn relu(Secret Field<64> x) -> Field<64> {
+fn relu(Secret Field<9223372036854775807> x) -> Field<9223372036854775807> {
     if x < 4611686018427387904 {
         return x;
     } else {
@@ -34,18 +34,18 @@ fn relu(Secret Field<64> x) -> Field<64> {
     }
 }
 
-fn mnist_infer(Secret Array<Field<64>, 16> pixels) -> Field<64> {
+fn mnist_infer(Secret Array<Field<9223372036854775807>, 16> pixels) -> Field<9223372036854775807> {
     // --- Layer 1 weights: 4 neurons x 16 inputs ---
     // Each neuron fires on one 2x2 quadrant of the 4x4 image (weight = 64, else 0).
-    let Public Array<Field<64>, 16> w0 = [64, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    let Public Array<Field<64>, 16> w1 = [0, 0, 64, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0];
-    let Public Array<Field<64>, 16> w2 = [0, 0, 0, 0, 0, 0, 0, 0, 64, 64, 0, 0, 64, 64, 0, 0];
-    let Public Array<Field<64>, 16> w3 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 64, 0, 0, 64, 64];
+    let Public Array<Field<9223372036854775807>, 16> w0 = [64, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let Public Array<Field<9223372036854775807>, 16> w1 = [0, 0, 64, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0];
+    let Public Array<Field<9223372036854775807>, 16> w2 = [0, 0, 0, 0, 0, 0, 0, 0, 64, 64, 0, 0, 64, 64, 0, 0];
+    let Public Array<Field<9223372036854775807>, 16> w3 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 64, 0, 0, 64, 64];
 
-    let Secret Field<64> h0 = 0;
-    let Secret Field<64> h1 = 0;
-    let Secret Field<64> h2 = 0;
-    let Secret Field<64> h3 = 0;
+    let Secret Field<9223372036854775807> h0 = 0;
+    let Secret Field<9223372036854775807> h1 = 0;
+    let Secret Field<9223372036854775807> h2 = 0;
+    let Secret Field<9223372036854775807> h3 = 0;
 
     for i in 0..16 {
         h0 = h0 + w0[i] * pixels[i];
@@ -61,15 +61,15 @@ fn mnist_infer(Secret Array<Field<64>, 16> pixels) -> Field<64> {
     h3 = relu(h3);
 
     // --- Layer 2: 4 -> 4 output logits (diagonal weights x 64) ---
-    let Secret Field<64> s0 = 64 * h0;
-    let Secret Field<64> s1 = 64 * h1;
-    let Secret Field<64> s2 = 64 * h2;
-    let Secret Field<64> s3 = 64 * h3;
+    let Secret Field<9223372036854775807> s0 = 64 * h0;
+    let Secret Field<9223372036854775807> s1 = 64 * h1;
+    let Secret Field<9223372036854775807> s2 = 64 * h2;
+    let Secret Field<9223372036854775807> s3 = 64 * h3;
 
     // --- Argmax: sequential comparisons, two Select gates per step ---
     // Unsigned comparison is correct here because all logits are non-negative.
-    let Secret Field<64> best_val = s0;
-    let Secret Field<64> best_idx = 0;
+    let Secret Field<9223372036854775807> best_val = s0;
+    let Secret Field<9223372036854775807> best_idx = 0;
 
     if s1 > best_val {
         best_val = s1;

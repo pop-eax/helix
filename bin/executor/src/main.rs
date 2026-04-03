@@ -51,6 +51,10 @@ struct Cli {
     /// Overrides --inputs-file.
     #[arg(long)]
     party_addrs: Option<String>,
+
+    /// Enable SHA256 commitment verification for input shares (BGW backends only).
+    #[arg(long)]
+    commit: bool,
 }
 
 // ── TOML config structs ───────────────────────────────────────────────────────
@@ -226,7 +230,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "bgw" => {
             let parties   = cfg.parties  .ok_or("--parties (or backend.parties in TOML) required for bgw")?;
             let threshold = cfg.threshold.ok_or("--threshold (or backend.threshold in TOML) required for bgw")?;
-            let outputs = run_single_process_bgw(&program, &cfg.inputs_str, parties, threshold)?;
+            let outputs = run_single_process_bgw(&program, &cfg.inputs_str, parties, threshold, cli.commit)?;
             print_outputs(&outputs);
         }
         "bgw-np" => {
@@ -234,7 +238,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let parties   = cfg.parties  .ok_or("--parties (or backend.parties in TOML) required for bgw-np")?;
             let threshold = cfg.threshold.ok_or("--threshold (or backend.threshold in TOML) required for bgw-np")?;
             let addrs_str = cfg.party_addrs.ok_or("--party-addrs (or network.party_addrs in TOML) required for bgw-np")?;
-            run_bgw_networked(&program, &cfg.inputs_str, my_id, parties, threshold, &addrs_str).await?;
+            run_bgw_networked(&program, &cfg.inputs_str, my_id, parties, threshold, &addrs_str, cli.commit).await?;
         }
         "yao-2p" => {
             let my_id     = cfg.my_id.ok_or("--my-id (or backend.my_id in TOML) required for yao-2p")?;
@@ -273,10 +277,15 @@ fn run_single_process_bgw(
     inputs_str: &str,
     parties: usize,
     threshold: usize,
+    commit: bool,
 ) -> Result<Vec<(WireId, u64)>, Box<dyn std::error::Error>> {
     let input_wires = parse_inputs(program, inputs_str)?;
     let cfg = bgw::BgwConfig { parties, threshold };
-    let mut b = bgw::BgwBackend::new(cfg)?;
+    let field = bgw::PrimeField::new(program.metadata.field_modulus.unwrap_or((1u64 << 63) - 1));
+    let mut b = bgw::BgwBackend::new(cfg, field)?;
+    if commit {
+        b = b.with_commits();
+    }
     Ok(execute_program(program, &mut b, &input_wires)?)
 }
 
@@ -400,6 +409,7 @@ async fn run_bgw_networked(
     parties: usize,
     threshold: usize,
     addrs_str: &str,
+    commit: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addrs: Vec<&str> = addrs_str.split(',').collect();
     if addrs.len() != parties {
@@ -415,9 +425,10 @@ async fn run_bgw_networked(
     let mut network = net::connect(config).await?;
     eprintln!("[party {my_id}] connected");
 
+    let field = bgw::PrimeField::new(program.metadata.field_modulus.unwrap_or((1u64 << 63) - 1));
     let n_muls = bgw::count_multiplications(program);
     let my_triple_blob: Vec<u8> = if my_id == 0 {
-        let blobs = bgw::dealer_generate_triple_blobs(n_muls, parties, threshold);
+        let blobs = bgw::dealer_generate_triple_blobs(n_muls, parties, threshold, &field);
         for (j, blob) in blobs.iter().enumerate() {
             if j != my_id {
                 network.send(j, blob).await?;
@@ -431,8 +442,11 @@ async fn run_bgw_networked(
 
     let triple_shares = bgw::parse_triple_blob(&my_triple_blob)
         .map_err(|e| format!("triple blob: {e}"))?;
-    let backend = bgw::BgwNetBackend::new(my_id, parties, threshold, triple_shares)
+    let mut backend = bgw::BgwNetBackend::new(my_id, parties, threshold, field, triple_shares)
         .map_err(|e| format!("bgw backend: {e}"))?;
+    if commit {
+        backend = backend.with_commits();
+    }
 
     let inputs = parse_input_spec(program, input_spec, my_id, parties)?;
 
