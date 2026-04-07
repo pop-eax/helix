@@ -1,0 +1,27 @@
+[package]
+name = "helix-fuzz-targets"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+frontend = { path = "../crates/frontend" }
+ir        = { path = "../crates/ir" }
+runtime   = { path = "../crates/runtime" }
+
+# cargo-fuzz requires the fuzz targets to be separate binaries
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_pipeline"
+path = "fuzz_targets/fuzz_pipeline.rs"
+test = false
+doc = false

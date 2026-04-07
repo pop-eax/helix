@@ -22,3 +22,18 @@
 tests/samples/snp_psi_alice.toml
 tests/samples/snp_psi_bob.toml
 tests/samples/snp_psi_combined.toml
+
+# Coq extraction build artifacts
+verify/dsl-verify/extraction/extracted/
+verify/dsl-verify/extraction/helix_eval
+verify/dsl-verify/extraction/*.cmi
+verify/dsl-verify/extraction/*.cmx
+verify/dsl-verify/extraction/*.o
+verify/dsl-verify/extraction/*.vo
+verify/dsl-verify/extraction/*.vok
+verify/dsl-verify/extraction/*.vos
+verify/dsl-verify/extraction/*.glob
+verify/dsl-verify/extraction/.*.aux
+
+# Generated fuzz test samples
+tests/fuzz-samples/

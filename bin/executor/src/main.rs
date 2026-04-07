@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use clap::Parser;
 use ir::lir::{PartyId, Program, WireId};
@@ -464,8 +464,12 @@ async fn run_bgw_networked(
 #[derive(Serialize, Deserialize)]
 struct GarblerMsg {
     garbled_circuit:      garbledc::circuit::Circuit,
-    garbler_active_labels: HashMap<String, u128>,
-    output_label_pairs:   HashMap<String, u8>,
+    /// Active labels indexed by slot (None for evaluator-owned slots).
+    garbler_active_labels: Vec<Option<u128>>,
+    /// Decode table indexed by slot: lsb(label₀) for each output slot.
+    output_label_pairs:   Vec<u8>,
+    /// Base slot for each evaluator input wire, in the same order as the OT messages.
+    eval_wire_base_slots: Vec<usize>,
     ot_ciphertexts:       Vec<(u128, u128)>,
 }
 
@@ -546,8 +550,10 @@ async fn garbler_run(
     }
 
     let mut ot_messages: Vec<(u128, u128)> = Vec::new();
+    let mut eval_wire_base_slots: Vec<usize> = Vec::new();
     for &wire in &eval_wires {
         backend.register_evaluator_wire(wire);
+        eval_wire_base_slots.push(backend.wire_base_slot(wire));
         for bit_idx in 0..bits {
             let [l0, l1] = backend
                 .wire_label_pair(wire, bit_idx)
@@ -576,6 +582,7 @@ async fn garbler_run(
                 garbled_circuit,
                 garbler_active_labels,
                 output_label_pairs,
+                eval_wire_base_slots,
                 ot_ciphertexts,
             },
         )
@@ -620,28 +627,35 @@ async fn evaluator_run(
 
     let my_labels: Vec<u128> = ot_receiver.finish(&msg.ot_ciphertexts);
 
-    let mut eval_active: HashMap<String, u128> = HashMap::new();
-    for (wire_idx, &(wire, _)) in eval_inputs.iter().enumerate() {
+    // Fill evaluator-owned slots into the active-label Vec.
+    let mut active_labels = msg.garbler_active_labels;
+    for (wire_idx, &base_slot) in msg.eval_wire_base_slots.iter().enumerate() {
         for bit_idx in 0..bits {
-            let name = format!("w{}_b{}", wire.0, bit_idx);
-            eval_active.insert(name, my_labels[wire_idx * bits + bit_idx]);
+            let slot = base_slot + bit_idx;
+            if slot < active_labels.len() {
+                active_labels[slot] = Some(my_labels[wire_idx * bits + bit_idx]);
+            }
         }
     }
 
-    let mut active_labels = msg.garbler_active_labels;
-    active_labels.extend(eval_active);
     let results = msg.garbled_circuit.evaluate(active_labels);
 
+    // Decode output values: each output wire occupies `bits` consecutive slots
+    // starting at the wire's base slot in the circuit outputs list.
     let mut output_values: Vec<u64> = Vec::new();
     for &out_wire in &program.circuit.outputs {
         let mut value = 0u64;
         for bit_idx in 0..bits {
-            let bit_name = format!("w{}_b{}", out_wire.0, bit_idx);
-            if let (Some(&active), Some(&decode_bit)) =
-                (results.get(&bit_name), msg.output_label_pairs.get(&bit_name))
-            {
-                let bit = ((active & 1) ^ (decode_bit as u128)) as u64;
-                value |= bit << bit_idx;
+            // Output slots are listed in order in garbled_circuit.outputs.
+            // Find the slot for this wire+bit from the outputs slice.
+            let slot_idx = out_wire.0 * bits + bit_idx;
+            if let Some(&slot) = msg.garbled_circuit.outputs.get(slot_idx) {
+                if let (Some(active), Some(&decode_bit)) =
+                    (results.get(slot).copied().flatten(), msg.output_label_pairs.get(slot))
+                {
+                    let bit = ((active & 1) ^ (decode_bit as u128)) as u64;
+                    value |= bit << bit_idx;
+                }
             }
         }
         output_values.push(value);

@@ -11,6 +11,7 @@ members = [
     "bin/compiler",
     "bin/executor",
     "bench",
+    "crates/fuzz"
 ]
 resolver = "2"
 
