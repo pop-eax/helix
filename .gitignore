@@ -23,6 +23,9 @@ tests/samples/snp_psi_alice.toml
 tests/samples/snp_psi_bob.toml
 tests/samples/snp_psi_combined.toml
 
+# Generated MNIST test images — run bench/data/mnist_prep.py to regenerate
+bench/data/mnist_images.toml
+
 # Coq extraction build artifacts
 verify/dsl-verify/extraction/extracted/
 verify/dsl-verify/extraction/helix_eval

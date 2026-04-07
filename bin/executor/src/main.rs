@@ -463,14 +463,16 @@ async fn run_bgw_networked(
 /// Message sent from garbler (party 0) to evaluator (party 1).
 #[derive(Serialize, Deserialize)]
 struct GarblerMsg {
-    garbled_circuit:      garbledc::circuit::Circuit,
+    garbled_circuit:        garbledc::circuit::Circuit,
     /// Active labels indexed by slot (None for evaluator-owned slots).
-    garbler_active_labels: Vec<Option<u128>>,
+    garbler_active_labels:  Vec<Option<u128>>,
     /// Decode table indexed by slot: lsb(label₀) for each output slot.
-    output_label_pairs:   Vec<u8>,
+    output_label_pairs:     Vec<u8>,
     /// Base slot for each evaluator input wire, in the same order as the OT messages.
-    eval_wire_base_slots: Vec<usize>,
-    ot_ciphertexts:       Vec<(u128, u128)>,
+    eval_wire_base_slots:   Vec<usize>,
+    /// Base slot for each LIR output wire, in the same order as program.circuit.outputs.
+    output_wire_base_slots: Vec<usize>,
+    ot_ciphertexts:         Vec<(u128, u128)>,
 }
 
 async fn run_yao_two_party(
@@ -575,6 +577,10 @@ async fn garbler_run(
     let (garbled_circuit, garbler_active_labels, output_label_pairs) =
         backend.finalize_garbler();
 
+    let output_wire_base_slots: Vec<usize> = program.circuit.outputs.iter()
+        .map(|&w| backend.wire_base_slot(w))
+        .collect();
+
     network
         .send(
             1,
@@ -583,6 +589,7 @@ async fn garbler_run(
                 garbler_active_labels,
                 output_label_pairs,
                 eval_wire_base_slots,
+                output_wire_base_slots,
                 ot_ciphertexts,
             },
         )
@@ -640,22 +647,17 @@ async fn evaluator_run(
 
     let results = msg.garbled_circuit.evaluate(active_labels);
 
-    // Decode output values: each output wire occupies `bits` consecutive slots
-    // starting at the wire's base slot in the circuit outputs list.
+    // Decode output values using the base slots sent by the garbler.
     let mut output_values: Vec<u64> = Vec::new();
-    for &out_wire in &program.circuit.outputs {
+    for &base_slot in &msg.output_wire_base_slots {
         let mut value = 0u64;
         for bit_idx in 0..bits {
-            // Output slots are listed in order in garbled_circuit.outputs.
-            // Find the slot for this wire+bit from the outputs slice.
-            let slot_idx = out_wire.0 * bits + bit_idx;
-            if let Some(&slot) = msg.garbled_circuit.outputs.get(slot_idx) {
-                if let (Some(active), Some(&decode_bit)) =
-                    (results.get(slot).copied().flatten(), msg.output_label_pairs.get(slot))
-                {
-                    let bit = ((active & 1) ^ (decode_bit as u128)) as u64;
-                    value |= bit << bit_idx;
-                }
+            let slot = base_slot + bit_idx;
+            if let (Some(active), Some(&decode_bit)) = (
+                results.get(slot).copied().flatten(),
+                msg.output_label_pairs.get(slot),
+            ) {
+                value |= (((active & 1) ^ decode_bit as u128) as u64) << bit_idx;
             }
         }
         output_values.push(value);

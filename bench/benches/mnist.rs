@@ -121,13 +121,11 @@ fn assignments(prog: &Program, vals: &[u64], n: usize, my_id: usize) -> Vec<Inpu
 }
 
 /// Build a complete input vector for the MNIST linear circuit by substituting
-/// `data::IMAGES[img_idx]` into the last 784 slots of `base_vals` (the weights).
-fn build_mnist_vals(base_vals: &[u64], img_idx: usize) -> Vec<u64> {
+/// `pixels` (784 encoded values) into the last 784 slots of `base_vals`.
+fn build_mnist_vals(base_vals: &[u64], pixels: &[u64]) -> Vec<u64> {
     let n_weights = base_vals.len() - 784;
     let mut vals = base_vals.to_vec();
-    for (i, &px) in data::IMAGES[img_idx].iter().enumerate() {
-        vals[n_weights + i] = px;
-    }
+    vals[n_weights..].copy_from_slice(pixels);
     vals
 }
 
@@ -357,38 +355,41 @@ fn bench_bgw_mnist(c: &mut Criterion) {
     let prog = load_circuit(&root.join("tests/samples/mnist_linear.ir").to_string_lossy());
     let base_vals =
         load_values(&root.join("tests/samples/mnist_linear.toml").to_string_lossy());
+    let mnist = data::load(&root.join("bench/data"));
 
     // ── Accuracy pre-check ────────────────────────────────────────────────────
     // Run all 10 real MNIST test images once (outside Criterion timing) to
     // verify correctness before benchmarking.
-    eprint!("\nBGW MNIST accuracy check (10 images)... ");
+    eprint!("\nBGW MNIST accuracy check ({} images)... ", mnist.images.len());
     let mut correct = 0usize;
-    for img_idx in 0..10 {
-        let vals = build_mnist_vals(&base_vals, img_idx);
+    for (img_idx, (pixels, &label)) in mnist.images.iter().zip(mnist.labels.iter()).enumerate() {
+        let vals = build_mnist_vals(&base_vals, pixels);
         let outputs = rt.block_on(bgw_run(&prog, &vals, 3, 1));
         let predicted = signed_argmax(&outputs);
-        let label = data::LABELS[img_idx];
         if predicted == label {
             correct += 1;
         }
         eprint!("{}", if predicted == label { "✓" } else { "✗" });
+        let _ = img_idx;
     }
-    eprintln!(" → {correct}/10 correct");
+    eprintln!(" → {correct}/{} correct", mnist.images.len());
 
     // ── Criterion timing ─────────────────────────────────────────────────────
-    // Each iteration picks the next image round-robin (0, 1, …, 9, 0, …).
+    // Each iteration picks the next image round-robin.
     // Only the BGW execution time is counted; input construction is in setup.
     let mut group = c.benchmark_group("bgw_networked_mnist");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(300));
 
+    let n_images = mnist.images.len();
     let mut img_idx = 0usize;
     group.bench_function("full_784_3p_t1", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
             for _ in 0..iters {
-                let vals = build_mnist_vals(&base_vals, img_idx % 10);
+                let pixels = &mnist.images[img_idx % n_images];
                 img_idx += 1;
+                let vals = build_mnist_vals(&base_vals, pixels);
                 let start = Instant::now();
                 rt.block_on(bgw_run(&prog, &vals, 3, 1));
                 total += start.elapsed();
