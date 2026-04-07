@@ -177,7 +177,7 @@ pub enum HirInstructionKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HirTerminator {
     /// Return a value
-    Return { value: HirValue },
+    Return { values: Vec<HirValue> },
     /// Conditional branch
     Branch { condition: HirValue, then_block: BlockId, else_block: BlockId },
     /// Unconditional jump

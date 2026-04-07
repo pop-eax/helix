@@ -1,0 +1,41 @@
+// SNP Private Set Intersection — 64-element sets
+//
+// Two parties compute the size of the intersection of their private SNP
+// variant sets without revealing which variants they carry.
+//
+// Each party holds 64 SNP rsid integers (the numeric part of "rsNNNNNN").
+// The output is the number of rsids that appear in both sets.
+//
+// Biological interpretation:
+//   Intersection size / 64  ≈  fraction of heterozygous variant positions
+//   shared by both individuals.  First-degree relatives (parent-child,
+//   full siblings) share roughly 50% of heterozygous positions; unrelated
+//   individuals from the same population share far fewer.
+//
+// RSid integers are at most ~10^9 (≈30 bits), so 32-bit Yao arithmetic
+// is sufficient and correct — no 63-bit prime field overhead.
+//
+// Protocol: Yao (2-party garbled circuits)
+//   Alice holds alice[0..64], Bob holds bob[0..64].
+//   Circuit: 64×64 = 4096 equality checks, 64 OR chains, 64 Select gates.
+//
+// Example (clear):
+//   runner snp_psi.ir -i "1,2,3,...,64,1,2,35,...,96" -b clear  => 32
+fn snp_psi(
+    Secret Array<Field<9223372036854775807>, 64> alice,
+    Secret Array<Field<9223372036854775807>, 64> bob
+) -> Field<9223372036854775807> {
+    let Secret Field<9223372036854775807> count = 0;
+    for i in 0..64 {
+        let Secret Bool found = false;
+        for j in 0..64 {
+            found = found || (alice[i] == bob[j]);
+        }
+        if found {
+            count = count + 1;
+        } else {
+            count = count;
+        }
+    }
+    return count;
+}

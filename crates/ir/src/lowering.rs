@@ -264,9 +264,11 @@ impl Lowerer {
 
     fn lower_terminator(&mut self, terminator: &HirTerminator, _blocks: &HashMap<BlockId, HirBlock>) -> LoweringResult<()> {
         match terminator {
-            HirTerminator::Return { value } => {
-                let wire = self.get_wire_for_value(value)?;
-                self.builder.add_output(wire);
+            HirTerminator::Return { values } => {
+                for value in values {
+                    let wire = self.get_wire_for_value(value)?;
+                    self.builder.add_output(wire);
+                }
             }
             HirTerminator::Branch { condition, then_block: _, else_block: _ } => {
                 // Conditional branches would need multiplexer gates
@@ -358,7 +360,7 @@ mod tests {
         );
 
         builder.set_terminator(HirTerminator::Return {
-            value: HirValue::Instruction(add_id),
+            values: vec![HirValue::Instruction(add_id)],
         });
 
         let blocks = builder.get_blocks();
@@ -431,7 +433,7 @@ mod tests {
         );
 
         builder.set_terminator(HirTerminator::Return {
-            value: HirValue::Instruction(return_id),
+            values: vec![HirValue::Instruction(return_id)],
         });
 
         let blocks = builder.get_blocks();

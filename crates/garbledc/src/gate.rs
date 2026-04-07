@@ -3,7 +3,6 @@ use aes_gcm::{
 };
 use itertools::Itertools;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use rand::{seq::SliceRandom};
 use rand::rng;
 use serde::{Serialize, Deserialize};
@@ -27,7 +26,6 @@ pub fn combine_keys(keys: Vec<u128>) -> [u8; 32] {
 }
 
 pub fn encrypt(k: &[u8; 32], pt: [u8; 16]) -> (Vec<u8>, Vec<u8>) {
-    // let key = Key::<Aes128Gcm>::from_slice(k);
     let cipher = Aes256Gcm::new_from_slice(k).unwrap();
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher.encrypt(&nonce, pt.as_ref()).unwrap();
@@ -49,53 +47,36 @@ pub fn decrypt(
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Gate {
-    // compute_fn: Box<dyn Fn(&[bool]) -> bool + Send + Sync>,
-    // is_free: bool,
     logic_table: Vec<u8>,
-    // pub labels: HashMap<String, [u128; 2]>,
     truth_table: Vec<(Vec<u128>, u128)>,
-    // garbled_table: Vec<(Vec<u128>, (Vec<u8>, Vec<u8>))>,
     garbled_table: Vec<(Vec<u8>, Vec<u8>)>,
-    input_labels: Vec<String>,
-    output_label: String
+    input_slots: Vec<usize>,   // slot indices into Circuit::labels
+    output_slot: usize,
 }
 
 impl Gate {
     pub fn new(
-        // is_free: bool,
         logic_table: Vec<u8>,
-        input_names: Vec<String>,
-        output_name: String
+        input_slots: Vec<usize>,
+        output_slot: usize,
     ) -> Self {
         Self {
-            // is_free,
             logic_table,
-            // labels: HashMap::new(),
             truth_table: Vec::new(),
             garbled_table: Vec::new(),
-            input_labels: input_names,
-            output_label: output_name
+            input_slots,
+            output_slot,
         }
     }
 
+    /// Build the truth table using label pairs from the circuit's flat label Vec.
     pub fn label_table(
         &mut self,
-        circuit_labels: &HashMap<String, [u128; 2]>
+        circuit_labels: &[[u128; 2]],
     ) -> (Vec<u128>, Vec<Vec<u128>>) {
-        // let label_values: Vec<[u128; 2]> = (0..input_labels.len())
-        //     .map(|_| [random_label(), random_label()])
-        //     .collect();
+        let output_labels = circuit_labels[self.output_slot];
 
-        // let output_labels: [u128; 2] = [random_label(), random_label()];
-        // self.labels.insert(out_label, output_labels);
-        // for i in 0..input_labels.len() {
-        //     let l = input_labels.get(i).unwrap().to_string();
-        //     let v = *label_values.get(i).unwrap();
-        //     self.labels.insert(l, v);
-        // }
-        let output_labels = circuit_labels[&self.output_label];
-
-        let truth_table: Vec<Vec<u8>> = vec![vec![0, 1]; self.input_labels.len()]
+        let truth_table: Vec<Vec<u8>> = vec![vec![0, 1]; self.input_slots.len()]
             .into_iter()
             .multi_cartesian_product()
             .collect();
@@ -105,7 +86,7 @@ impl Gate {
             .map(|row| {
                 row.iter()
                     .enumerate()
-                    .map(|(idx, val)| circuit_labels.get(&self.input_labels[idx]).unwrap()[*val as usize])
+                    .map(|(idx, val)| circuit_labels[self.input_slots[idx]][*val as usize])
                     .collect()
             })
             .collect();
@@ -123,8 +104,6 @@ impl Gate {
     }
 
     pub fn garble_table(&mut self) -> Vec<(Vec<u8>, Vec<u8>)>{
-        //  aes_gcm::Nonce<aes_gcm::aead::consts::U12>
-        // member to shuffle
         self.garbled_table = self
             .truth_table
             .iter()
@@ -152,12 +131,12 @@ impl Gate {
         None
     }
 
-    pub fn input_labels(&self) -> &[String] {
-        &self.input_labels
+    pub fn input_slots(&self) -> &[usize] {
+        &self.input_slots
     }
-    
-    pub fn output_label(&self) -> &str {
-        &self.output_label
+
+    pub fn output_slot(&self) -> usize {
+        self.output_slot
     }
 }
 

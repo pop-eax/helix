@@ -17,3 +17,8 @@
 /verify/dsl-verify/.coq-native/
 
 *.ir
+
+# Generated from personal genetic data — do not commit
+tests/samples/snp_psi_alice.toml
+tests/samples/snp_psi_bob.toml
+tests/samples/snp_psi_combined.toml

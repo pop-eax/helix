@@ -20,14 +20,18 @@
 
 // ReLU activation for Field<9223372036854775807>.
 // The runtime uses a prime field with modulus M = 2^63 - 1 = 9223372036854775807.
-// "Negative" values (those that wrapped below zero) satisfy x > M/2,
-// i.e. x >= 4611686018427387904.  Positive values are below that threshold.
+// "Negative" values (those that wrapped below zero) would satisfy x > M/2.
+// We use 1048576 (2^20) as the threshold since all valid activations are <= 65280.
 // With non-negative weights and pixel values (0-255) all hidden activations
 // are at most 4 * 64 * 255 = 65280, safely below M/2, so relu is effectively
 // identity here — but the Select gate is still generated, exercising that
 // code path through the compiler and backend.
+//
+// Threshold 1048576 (2^20) is used instead of M/2 (2^62) so that the relu
+// is representable with small bit-widths in Yao evaluation (24 bits suffice).
+// All valid activations (<= 65280) are correctly classified as non-negative.
 fn relu(Secret Field<9223372036854775807> x) -> Field<9223372036854775807> {
-    if x < 4611686018427387904 {
+    if x < 1048576 {
         return x;
     } else {
         return 0;

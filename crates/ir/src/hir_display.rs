@@ -128,7 +128,10 @@ fn display_hir_instruction_kind(kind: &HirInstructionKind) -> String {
 
 fn display_hir_terminator(terminator: &HirTerminator, _all_blocks: &std::collections::HashMap<BlockId, HirBlock>) -> String {
     match terminator {
-        HirTerminator::Return { value } => format!("return {}", display_hir_value(value)),
+        HirTerminator::Return { values } => {
+            let parts: Vec<String> = values.iter().map(display_hir_value).collect();
+            format!("return ({})", parts.join(", "))
+        }
         HirTerminator::Branch { condition, then_block, else_block } => {
             format!("br({}, {:?}, {:?})", display_hir_value(condition), then_block, else_block)
         }

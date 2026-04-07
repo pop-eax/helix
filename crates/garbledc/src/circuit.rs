@@ -1,66 +1,80 @@
 use super::gate::Gate;
-use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use rayon::prelude::*;
 
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Circuit {
-    pub labels: HashMap<String, [u128; 2]>,
+    /// Flat label storage: labels[slot] = [label₀, label₁].
+    /// Slot 0 is unused (reserved so that 0 is never a valid unallocated slot
+    /// when used as an index — though the backend never uses slot 0 in practice).
+    pub labels: Vec<[u128; 2]>,
     pub gates: Vec<Gate>,
-
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
+    /// Slot indices of circuit-input bits (one per input bit).
+    pub inputs: Vec<usize>,
+    /// Slot indices of circuit-output bits.
+    pub outputs: Vec<usize>,
+    /// Total number of allocated slots (used by the evaluator to size its
+    /// active-label Vec without needing the full label pairs).
+    pub n_slots: usize,
 }
 
 impl Circuit {
     pub fn new() -> Self {
         Self {
-            labels: HashMap::new(),
+            labels: Vec::new(),
             gates: Vec::new(),
             inputs: Vec::new(),
             outputs: Vec::new(),
+            n_slots: 0,
         }
     }
 
-    pub fn get_or_create_labels(&mut self, wire_name: &str) -> [u128; 2] {
-        if let Some(&labels) = self.labels.get(wire_name) {
-            labels
-        } else {
+    /// Ensure slot `slot` exists in `labels` and has a valid label pair.
+    /// Grows the Vec if needed; allocates a fresh random pair on first use.
+    /// Returns the label pair.
+    pub fn ensure_slot(&mut self, slot: usize) -> [u128; 2] {
+        if slot >= self.labels.len() {
+            self.labels.resize(slot + 1, [0u128; 2]);
+        }
+        if self.labels[slot] == [0u128; 2] {
             // Enforce color-bit convention: lsb(label₀) = 0, lsb(label₁) = 1.
-            // This means the active label's LSB is the wire's truth value, so
-            // output decoding only requires one bit per wire (lsb(label₀)).
-            let label0 = super::random_label() & !1u128;
-            let label1 = super::random_label() | 1u128;
-            let new_labels = [label0, label1];
-            self.labels.insert(wire_name.to_string(), new_labels);
-            new_labels
+            let l0 = super::random_label() & !1u128;
+            let l1 = super::random_label() | 1u128;
+            self.labels[slot] = [l0, l1];
+            self.n_slots = self.n_slots.max(slot + 1);
+        }
+        self.labels[slot]
+    }
+
+    /// Register `slot` as a circuit input (allocates labels; idempotent).
+    pub fn add_input_slot(&mut self, slot: usize) {
+        self.ensure_slot(slot);
+        if !self.inputs.contains(&slot) {
+            self.inputs.push(slot);
         }
     }
 
-    pub fn add_input(&mut self, name: &str){
-        self.get_or_create_labels(name);
-        if !self.inputs.contains(&name.to_string()) {
-            self.inputs.push(name.to_string());
+    /// Register `slot` as a circuit output (allocates labels; idempotent).
+    pub fn add_output_slot(&mut self, slot: usize) {
+        self.ensure_slot(slot);
+        if !self.outputs.contains(&slot) {
+            self.outputs.push(slot);
         }
     }
 
-    pub fn add_output(&mut self, name: &str) {
-        self.get_or_create_labels(name);
-        if !self.outputs.contains(&name.to_string()) {
-            self.outputs.push(name.to_string());
-        }
+    /// Return the active label for `slot` and `bit` (0 or 1).
+    pub fn get_label(&self, slot: usize, bit: u8) -> Option<u128> {
+        self.labels.get(slot).map(|l| l[bit as usize])
     }
 
-    pub fn add_gate(&mut self, logic_table: Vec<u8>, inputs: &[&str], output: &str) {
-        for &input in inputs {
-            self.get_or_create_labels(input);
+    /// Add a garbled gate.  All referenced slots are lazily allocated on demand.
+    pub fn add_gate(&mut self, logic_table: Vec<u8>, inputs: &[usize], output: usize) {
+        for &s in inputs {
+            self.ensure_slot(s);
         }
-        self.get_or_create_labels(output);
-
-        let input_names: Vec<String> = inputs.iter().map(|s| s.to_string()).collect();
-        let mut gate = Gate::new(logic_table, input_names, output.to_string());
-
+        self.ensure_slot(output);
+        let mut gate = Gate::new(logic_table, inputs.to_vec(), output);
         gate.label_table(&self.labels);
         self.gates.push(gate);
     }
@@ -72,100 +86,88 @@ impl Circuit {
             .collect()
     }
 
-    pub fn evaluate(&self, mut active_labels: HashMap<String, u128>) -> HashMap<String, u128> {
+    /// Evaluate the circuit.
+    ///
+    /// `active` is a Vec of length `n_slots`; each entry is `Some(label)` for
+    /// slots whose active label is known (all inputs must be set before calling).
+    /// Returns the same Vec with all output slots filled.
+    pub fn evaluate(&self, mut active: Vec<Option<u128>>) -> Vec<Option<u128>> {
         for gate in &self.gates {
-            let input_labels: Vec<u128> = gate
-                .input_labels()
+            let inputs: Vec<u128> = gate
+                .input_slots()
                 .iter()
-                .map(|name| active_labels[name])
+                .map(|&s| active[s].expect("missing active label during evaluation"))
                 .collect();
-
-            if let Some(output_label) = gate.clone().evaluate(input_labels) {
-                active_labels.insert(gate.output_label().to_string(), output_label);
+            if let Some(lbl) = gate.clone().evaluate(inputs) {
+                active[gate.output_slot()] = Some(lbl);
             }
         }
-
-        active_labels
+        active
     }
 
-    /// Compute the topological level of each gate in the boolean circuit.
+    /// Compute the topological level of each gate.
     /// Returns a Vec parallel to `self.gates` (gate i → its level).
-    /// Input wires (those in `self.inputs`) are at level 0.
     pub fn compute_gate_levels(&self) -> Vec<u32> {
-        let mut wire_level: HashMap<&str, u32> = self
-            .inputs
-            .iter()
-            .map(|name| (name.as_str(), 0u32))
-            .collect();
+        let mut wire_level: Vec<u32> = vec![0u32; self.n_slots.max(1)];
+        for &s in &self.inputs {
+            if s < wire_level.len() {
+                wire_level[s] = 0;
+            }
+        }
 
         let mut levels = Vec::with_capacity(self.gates.len());
         for gate in &self.gates {
             let lv = gate
-                .input_labels()
+                .input_slots()
                 .iter()
-                .map(|name| wire_level.get(name.as_str()).copied().unwrap_or(0))
+                .map(|&s| if s < wire_level.len() { wire_level[s] } else { 0 })
                 .max()
                 .unwrap_or(0)
                 + 1;
-            wire_level.insert(gate.output_label(), lv);
+            let out = gate.output_slot();
+            if out >= wire_level.len() {
+                wire_level.resize(out + 1, 0);
+            }
+            wire_level[out] = lv;
             levels.push(lv);
         }
         levels
     }
 
     /// Level-parallel evaluation using rayon.
-    ///
-    /// Gates at the same topological level are independent and evaluated
-    /// concurrently.  Suitable for circuits up to a few million gates; for
-    /// very large circuits the level-computation overhead may dominate.
-    pub fn evaluate_parallel(&self, mut active_labels: HashMap<String, u128>) -> HashMap<String, u128> {
+    pub fn evaluate_parallel(&self, mut active: Vec<Option<u128>>) -> Vec<Option<u128>> {
         if self.gates.is_empty() {
-            return active_labels;
+            return active;
         }
 
         let gate_levels = self.compute_gate_levels();
         let max_level = *gate_levels.iter().max().unwrap() as usize;
 
-        // Group gate indices by level.
         let mut by_level: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
         for (idx, &lv) in gate_levels.iter().enumerate() {
             by_level[lv as usize].push(idx);
         }
 
         for level_indices in &by_level {
-            // Parallel: each gate reads from active_labels (all earlier levels).
-            let new_labels: Vec<(String, u128)> = level_indices
+            let new_labels: Vec<(usize, u128)> = level_indices
                 .par_iter()
                 .filter_map(|&idx| {
                     let gate = &self.gates[idx];
                     let inputs: Vec<u128> = gate
-                        .input_labels()
+                        .input_slots()
                         .iter()
-                        .map(|n| active_labels[n.as_str()])
+                        .map(|&s| active[s].expect("missing active label"))
                         .collect();
-                    gate.clone().evaluate(inputs).map(|lbl| (gate.output_label().to_string(), lbl))
+                    gate.clone()
+                        .evaluate(inputs)
+                        .map(|lbl| (gate.output_slot(), lbl))
                 })
                 .collect();
-            // Sequential write: each wire is written by exactly one gate.
-            active_labels.extend(new_labels);
+            for (slot, lbl) in new_labels {
+                active[slot] = Some(lbl);
+            }
         }
 
-        active_labels
-    }
-
-    pub fn get_label(&self, wire_name: &str, bit: u8) -> Option<u128> {
-        self.labels.get(wire_name).map(|labels| labels[bit as usize])
-    }
-    
-    pub fn print_structure(&self) {
-        println!("=== Circuit Structure ===");
-        println!("Inputs: {:?}", self.inputs);
-        println!("Outputs: {:?}", self.outputs);
-        println!("\nGates:");
-        for (i, gate) in self.gates.iter().enumerate() {
-            println!("  Gate {}: {:?} -> {}", 
-                i, gate.input_labels(), gate.output_label());
-        }
-        println!("\nLabels: {} wires", self.labels.len());
+        active
     }
 }

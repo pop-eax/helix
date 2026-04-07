@@ -9,7 +9,8 @@ members = [
     "crates/bgw",
     "crates/net",
     "bin/compiler",
-    "bin/executor"
+    "bin/executor",
+    "bench",
 ]
 resolver = "2"
 

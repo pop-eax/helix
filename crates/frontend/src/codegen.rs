@@ -422,7 +422,7 @@ impl Codegen {
             if self.inline_depth > 0 {
                 self.inline_return = Some(ret_val);
             } else {
-                self.builder.set_terminator(HirTerminator::Return { value: ret_val });
+                self.builder.set_terminator(HirTerminator::Return { values: vec![ret_val] });
             }
         }
 
@@ -515,7 +515,12 @@ impl Codegen {
                         .to_string(),
                 ));
             }
-            self.builder.set_terminator(HirTerminator::Return { value });
+            let hir_values: Vec<HirValue> = if let Some(elements) = self.arrays.get(&value).cloned() {
+                elements
+            } else {
+                vec![value]
+            };
+            self.builder.set_terminator(HirTerminator::Return { values: hir_values });
         }
         Ok(())
     }
