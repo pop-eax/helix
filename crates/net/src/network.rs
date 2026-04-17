@@ -263,9 +263,9 @@ pub async fn connect(config: NetworkConfig) -> Result<Network> {
 
 /// Connect to `addr` with exponential-backoff retry (≈10 s total window).
 async fn connect_with_retry(addr: &str) -> Result<Channel> {
-    let mut delay = Duration::from_millis(100);
+    let mut delay = Duration::from_millis(5);
     let mut last_err = anyhow::anyhow!("no attempts made");
-    for _ in 0..8 {
+    for _ in 0..12 {
         match Channel::connect(addr).await {
             Ok(ch) => return Ok(ch),
             Err(e) => {

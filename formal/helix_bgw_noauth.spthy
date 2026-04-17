@@ -1,0 +1,253 @@
+/*
+ * Helix MPC Framework — Unauthenticated Channel Countermodel
+ * BGW Protocol: Full protocol lifecycle without channel authentication
+ *
+ * This theory is structurally parallel to helix_bgw.spthy but removes
+ * all channel authentication (no pairwise keys, no encryption).
+ * Messages are sent and received in plaintext over the Dolev-Yao
+ * network, modelling the security of Helix's current net::Channel
+ * implementation (plain TCP with no TLS or MAC layer).
+ *
+ * Purpose:  Demonstrate that the Zero Trust channel properties
+ *           (ZT-1: encrypt all communications, ZT-2: verify identity)
+ *           are *necessary* for protocol security, not merely a
+ *           labelling exercise.  Every secrecy and authentication
+ *           lemma that is verified in helix_bgw.spthy is falsified
+ *           here, while the reachability (liveness) lemmas still hold.
+ *
+ * The lemma statements are kept identical to helix_bgw.spthy so that
+ * the comparison is direct and mechanically checkable.
+ */
+
+theory Helix_BGW_NoAuth
+begin
+
+builtins: symmetric-encryption
+
+functions:
+  mk_share/2,       /* mk_share(secret, nonce) — opaque Shamir share */
+  mk_triple_a/4,    /* mk_triple_a(a, b, c, party) — dealer a-share */
+  mk_triple_b/4,    /* mk_triple_b(a, b, c, party) — dealer b-share */
+  mk_triple_c/4,    /* mk_triple_c(a, b, c, party) — dealer c-share */
+  masked/2          /* masked(share, triple_share) — δ or ε value    */
+
+/* ──────────────────── No Channel Setup ──────────────────── */
+
+/*
+ * No Setup_Auth_Channel rule.  Channels are unauthenticated:
+ * messages travel as plaintext over the Dolev-Yao network.
+ * The !AuthChan fact is never produced, so the Corrupt_Party
+ * rule below is vacuous (it can never fire).
+ */
+
+/* ──────────────────── Party Input ──────────────────── */
+
+rule Party_Has_Input:
+    [ Fr(~x), Fr(~r) ]
+  --[ HasInput($P, ~x) ]->
+    [ !PartyState($P, ~x, ~r) ]
+
+/* ──────────────────── Share Distribution ──────────────────── */
+
+/*
+ * Without channel keys, the share is sent as plaintext.
+ * The Dolev-Yao adversary can read it directly.
+ */
+rule Distribute_Share:
+    [ !PartyState($P, ~x, ~r) ]
+  --[ SendShare($P, $Q, mk_share(~x, ~r)) ]->
+    [ Out(<'share', mk_share(~x, ~r)>) ]
+
+/* ──────────────────── Share Receipt ──────────────────── */
+
+/*
+ * Without channel authentication, the receiver cannot verify the
+ * sender's identity.  $P is a free public variable: the adversary
+ * can trigger this rule with any claimed sender and any share value.
+ */
+rule Accept_Share:
+    [ In(<'share', share>) ]
+  --[ RecvShare($P, $Q, share),
+      Authentic($P, $Q, share) ]->
+    [ HoldShare($Q, $P, share) ]
+
+/* ──────────────────── Adversary Corruption ──────────────────── */
+
+/*
+ * In helix_bgw.spthy, corruption leaks a channel key.  Here there
+ * are no channel keys, so corruption gives the adversary nothing it
+ * does not already have (all traffic is plaintext).  The rule is
+ * retained so that the Corrupt() action referenced in the lemma
+ * statements is well-formed.  The adversary can choose to fire it
+ * or not; in either case it gains no additional power, because the
+ * network is already fully observable.
+ */
+rule Corrupt_Party:
+    [ Fr(~dummy) ]
+  --[ Corrupt($A) ]->
+    [ ]
+
+/* ══════════════════════════════════════════════════════════
+ * Beaver Triple Distribution (unauthenticated)
+ * ══════════════════════════════════════════════════════════ */
+
+rule Dealer_Create_Triple:
+    [ Fr(~a), Fr(~b), Fr(~c) ]
+  --[ DealerCreatedTriple(~a, ~b, ~c) ]->
+    [ !TriplePool(~a, ~b, ~c) ]
+
+/*
+ * Dealer sends triple shares as plaintext.
+ */
+rule Dealer_Distribute_Triple:
+    [ !TriplePool(~a, ~b, ~c) ]
+  --[ DealerSentTriple($P,
+        mk_triple_a(~a, ~b, ~c, $P),
+        mk_triple_b(~a, ~b, ~c, $P),
+        mk_triple_c(~a, ~b, ~c, $P)) ]->
+    [ Out(<'triple',
+           mk_triple_a(~a, ~b, ~c, $P),
+           mk_triple_b(~a, ~b, ~c, $P),
+           mk_triple_c(~a, ~b, ~c, $P)>) ]
+
+/*
+ * Party receives triple share from plaintext network.
+ * 'D' is a free public variable; no authentication of dealer identity.
+ */
+rule Party_Receive_Triple:
+    [ In(<'triple', ta, tb, tc>) ]
+  --[ AuthTriple($P, ta, tb, tc) ]->
+    [ HoldTriple($P, ta, tb, tc) ]
+
+/* ══════════════════════════════════════════════════════════
+ * Multiplication Broadcast (unauthenticated)
+ * ══════════════════════════════════════════════════════════ */
+
+rule Compute_Masked_Values:
+    [ Fr(~xs), Fr(~ys),
+      HoldTriple($P, ta, tb, tc) ]
+  --[ ComputedMasked($P, masked(~xs, ta), masked(~ys, tb)) ]->
+    [ !ComputedMask($P, masked(~xs, ta), masked(~ys, tb)) ]
+
+/*
+ * Masked values broadcast as plaintext.
+ */
+rule Broadcast_Masked_Values:
+    [ !ComputedMask($P, delta, epsilon) ]
+  --[ SentMasked($P, $Q, delta, epsilon) ]->
+    [ Out(<'masked', delta, epsilon>) ]
+
+/*
+ * Receiver cannot verify sender identity.
+ */
+rule Receive_Masked_Values:
+    [ In(<'masked', delta, epsilon>) ]
+  --[ AuthMasked($Q, $P, delta, epsilon) ]->
+    [ HoldMasked($Q, $P, delta, epsilon) ]
+
+/* ══════════════════════════════════════════════════════════
+ * Output Reconstruction (unauthenticated)
+ * ══════════════════════════════════════════════════════════ */
+
+rule Broadcast_Output_Share:
+    [ Fr(~out) ]
+  --[ SentOutputShare($P, $Q, ~out) ]->
+    [ !HoldOutputShare($P, ~out),
+      Out(<'output', ~out>) ]
+
+rule Receive_Output_Share:
+    [ In(<'output', out_share>) ]
+  --[ AuthOutputShare($Q, $P, out_share) ]->
+    [ HoldRecvShare($Q, $P, out_share) ]
+
+/* ──────────────────── Security Lemmas ──────────────────── */
+
+/*
+ * Identical lemma statements to helix_bgw.spthy.
+ * Expected: all secrecy and authentication lemmas FALSIFIED;
+ *           all reachability lemmas VERIFIED.
+ */
+
+/* ── Input Sharing ── */
+
+// Expected: FALSIFIED — adversary reads plaintext share, no Corrupt needed
+lemma share_secrecy:
+  "All P Q share #i #j.
+     SendShare(P, Q, share) @ i &
+     K(share) @ j
+     ==> Ex #c. Corrupt(P) @ c"
+
+// Expected: FALSIFIED — adversary injects forged share for any claimed sender
+lemma share_authentication:
+  "All P Q share #i.
+     Authentic(P, Q, share) @ i &
+     not (Ex #c. Corrupt(P) @ c)
+     ==> Ex #j. SendShare(P, Q, share) @ j & #j < #i"
+
+// Expected: VERIFIED — honest execution path still exists
+lemma share_exchange_reachable:
+  exists-trace
+  "Ex P Q share #i #j.
+     SendShare(P, Q, share) @ i &
+     RecvShare(P, Q, share) @ j &
+     #i < #j"
+
+/* ── Beaver Triple Distribution ── */
+
+// Expected: FALSIFIED — adversary reads plaintext triple share
+lemma triple_secrecy:
+  "All P ta tb tc #i #j.
+     DealerSentTriple(P, ta, tb, tc) @ i &
+     K(ta) @ j
+     ==> Ex #c. Corrupt('D') @ c"
+
+// Expected: FALSIFIED — adversary injects forged triple share
+lemma triple_share_authenticity:
+  "All P ta tb tc #i.
+     AuthTriple(P, ta, tb, tc) @ i &
+     not (Ex #c. Corrupt('D') @ c)
+     ==> Ex #j. DealerSentTriple(P, ta, tb, tc) @ j & #j < #i"
+
+// Expected: VERIFIED — honest execution path still exists
+lemma triple_distribution_reachable:
+  exists-trace
+  "Ex P ta tb tc #i #j.
+     DealerSentTriple(P, ta, tb, tc) @ i &
+     AuthTriple(P, ta, tb, tc) @ j &
+     #i < #j"
+
+/* ── Multiplication Broadcast ── */
+
+// Expected: FALSIFIED — adversary injects forged masked values
+lemma mul_broadcast_authentication:
+  "All Q P delta epsilon #i.
+     AuthMasked(Q, P, delta, epsilon) @ i &
+     not (Ex #c. Corrupt(P) @ c)
+     ==> Ex #j. SentMasked(P, Q, delta, epsilon) @ j & #j < #i"
+
+// Expected: VERIFIED — honest execution path still exists
+lemma multiplication_reachable:
+  exists-trace
+  "Ex P Q delta epsilon #i #j.
+     SentMasked(P, Q, delta, epsilon) @ i &
+     AuthMasked(Q, P, delta, epsilon) @ j &
+     #i < #j"
+
+/* ── Output Reconstruction ── */
+
+// Expected: FALSIFIED — adversary injects forged output share
+lemma output_share_authentication:
+  "All Q P share #i.
+     AuthOutputShare(Q, P, share) @ i &
+     not (Ex #c. Corrupt(P) @ c)
+     ==> Ex #j. SentOutputShare(P, Q, share) @ j & #j < #i"
+
+// Expected: VERIFIED — honest execution path still exists
+lemma output_reconstruction_reachable:
+  exists-trace
+  "Ex P Q share #i #j.
+     SentOutputShare(P, Q, share) @ i &
+     AuthOutputShare(Q, P, share) @ j &
+     #i < #j"
+
+end

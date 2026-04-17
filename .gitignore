@@ -40,3 +40,6 @@ verify/dsl-verify/extraction/.*.aux
 
 # Generated fuzz test samples
 tests/fuzz-samples/
+
+.dot
+.png
